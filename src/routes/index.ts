@@ -3,11 +3,13 @@ import healthRouter from "./health.js";
 import playersRouter from "./players.js";
 import resultsRouter from "./results.js";
 import webhookRouter from "./webhook.js";
+import presenceRouter from "./presence.js";
 
 const router: IRouter = Router();
 router.use(healthRouter);
 router.use(playersRouter);
 router.use(resultsRouter);
 router.use(webhookRouter);
+router.use(presenceRouter);
 
 export default router;
