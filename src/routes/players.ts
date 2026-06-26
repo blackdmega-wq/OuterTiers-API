@@ -51,65 +51,68 @@ function dbPlayerToWeb(p: DbPlayer) {
 }
 
 router.get("/players", async (_req, res) => {
-  const rows = await db.select().from(playersTable);
-  const players = rows.map(dbPlayerToWeb).sort((a, b) => b.points - a.points);
-  return res.json({ players });
+  try {
+    const rows = await db.select().from(playersTable);
+    const players = rows.map(dbPlayerToWeb).sort((a, b) => b.points - a.points);
+    return res.json({ players });
+  } catch (err) {
+    console.error("[/api/players] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+  }
 });
 
 router.get("/players/:username", async (req, res) => {
   const { username } = req.params;
-  const rows = await db.select().from(playersTable);
-  const row = rows.find(p => p.username.toLowerCase() === username.toLowerCase());
-  if (!row) return res.status(404).json({ error: "Player not found" });
+  try {
+    const rows = await db.select().from(playersTable);
+    const row = rows.find(p => p.username.toLowerCase() === username.toLowerCase());
+    if (!row) return res.status(404).json({ error: "Player not found" });
 
-  // Fetch tier results history for this player (newest first)
-  const history = await db
-    .select({
-      mode:      tierResultsTable.mode,
-      tier:      tierResultsTable.tier,
-      createdAt: tierResultsTable.createdAt,
-    })
-    .from(tierResultsTable)
-    .where(eq(tierResultsTable.userId, row.userId))
-    .orderBy(desc(tierResultsTable.createdAt));
+    const history = await db
+      .select({
+        mode:      tierResultsTable.mode,
+        tier:      tierResultsTable.tier,
+        createdAt: tierResultsTable.createdAt,
+      })
+      .from(tierResultsTable)
+      .where(eq(tierResultsTable.userId, row.userId))
+      .orderBy(desc(tierResultsTable.createdAt));
 
-  // Current tier per mode from the DB row
-  const modeCurrentTier: Record<string, string | null | undefined> = {
-    ogvanilla: row.ogvanillaTier, vanilla: row.vanillaTier, uhc: row.uhcTier,
-    pot: row.potTier, nethop: row.nethopTier, smp: row.smpTier,
-    sword: row.swordTier, axe: row.axeTier, mace: row.maceTier, speed: row.speedTier,
-  };
+    const modeCurrentTier: Record<string, string | null | undefined> = {
+      ogvanilla: row.ogvanillaTier, vanilla: row.vanillaTier, uhc: row.uhcTier,
+      pot: row.potTier, nethop: row.nethopTier, smp: row.smpTier,
+      sword: row.swordTier, axe: row.axeTier, mace: row.maceTier, speed: row.speedTier,
+    };
 
-  // Group history by mode (already sorted newest-first)
-  const modeHistory: Record<string, Array<{ tier: string; createdAt: number }>> = {};
-  for (const r of history) {
-    if (!r.mode || !r.tier) continue;
-    if (!modeHistory[r.mode]) modeHistory[r.mode] = [];
-    modeHistory[r.mode].push({ tier: r.tier, createdAt: r.createdAt });
-  }
+    const modeHistory: Record<string, Array<{ tier: string; createdAt: number }>> = {};
+    for (const r of history) {
+      if (!r.mode || !r.tier) continue;
+      if (!modeHistory[r.mode]) modeHistory[r.mode] = [];
+      modeHistory[r.mode].push({ tier: r.tier, createdAt: r.createdAt });
+    }
 
-  // For each mode find when the current-tier streak started (walk back through results)
-  // tierDates values are Unix seconds for Discord/display compatibility
-  const tierDates: Record<string, number> = {};
-  for (const [mode, results] of Object.entries(modeHistory)) {
-    const currentTier = modeCurrentTier[mode];
-    if (!currentTier) continue;
-
-    // Walk from newest to oldest; keep moving streakStart back while tier matches
-    let streakStartMs: number | null = null;
-    for (const r of results) {
-      if (r.tier === currentTier) {
-        streakStartMs = r.createdAt; // earlier match — push start further back
-      } else {
-        break; // streak broken — stop
+    const tierDates: Record<string, number> = {};
+    for (const [mode, results] of Object.entries(modeHistory)) {
+      const currentTier = modeCurrentTier[mode];
+      if (!currentTier) continue;
+      let streakStartMs: number | null = null;
+      for (const r of results) {
+        if (r.tier === currentTier) {
+          streakStartMs = r.createdAt;
+        } else {
+          break;
+        }
+      }
+      if (streakStartMs != null) {
+        tierDates[mode] = Math.floor(streakStartMs / 1000);
       }
     }
-    if (streakStartMs != null) {
-      tierDates[mode] = Math.floor(streakStartMs / 1000);
-    }
-  }
 
-  return res.json({ ...dbPlayerToWeb(row), tierDates });
+    return res.json({ ...dbPlayerToWeb(row), tierDates });
+  } catch (err) {
+    console.error("[/api/players/:username] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+  }
 });
 
 export default router;
