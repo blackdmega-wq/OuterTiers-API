@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: outertiers-api
+    env: node
+    buildCommand: npm install -g pnpm@8 && pnpm install
+    startCommand: node --dns-result-order=ipv4first ./node_modules/.bin/tsx src/index.ts
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: WEBSITE_API_SECRET
+        sync: false
+
