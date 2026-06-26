@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "node ./build.mjs",
-    "start": "node --dns-result-order=ipv4first ./node_modules/.bin/tsx src/index.ts",
+    "start": "node --dns-result-order=ipv4first ./dist/index.mjs",
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
