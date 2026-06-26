@@ -17,8 +17,8 @@ app.listen(port, () => {
     syncAllPlayers().catch(err => logger.error({ err }, "Startup Mojang sync failed"));
   }, 5_000);
 
-  // Re-sync every 6 hours to catch renames
+  // Re-sync once per day to catch renames (saves Neon compute)
   setInterval(() => {
     syncAllPlayers().catch(err => logger.error({ err }, "Scheduled Mojang sync failed"));
-  }, 6 * 60 * 60 * 1_000);
+  }, 24 * 60 * 60 * 1_000);
 });
