@@ -35,60 +35,65 @@ router.post("/webhook/tier", async (req, res) => {
   if (!guildId || !userId)
     return res.status(400).json({ error: "Missing required fields: guildId, userId" });
 
-  const now = Date.now();
-  const where = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId));
+  try {
+    const now = Date.now();
+    const where = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId));
 
-  if (type === "tierwipe") {
-    const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
-    if (existing.length > 0) {
-      await db.update(playersTable).set({
-        currentTier: null, peakTier: null,
-        ogvanillaTier: null, vanillaTier: null, uhcTier: null, potTier: null,
-        nethopTier: null, smpTier: null, swordTier: null, axeTier: null,
-        maceTier: null, speedTier: null, updatedAt: now,
-      }).where(where);
+    if (type === "tierwipe") {
+      const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
+      if (existing.length > 0) {
+        await db.update(playersTable).set({
+          currentTier: null, peakTier: null,
+          ogvanillaTier: null, vanillaTier: null, uhcTier: null, potTier: null,
+          nethopTier: null, smpTier: null, swordTier: null, axeTier: null,
+          maceTier: null, speedTier: null, updatedAt: now,
+        }).where(where);
+      }
+      return res.json({ ok: true });
     }
-    return res.json({ ok: true });
-  }
 
-  if (type === "setpeaktier") {
+    if (type === "setpeaktier") {
+      if (!tier) return res.status(400).json({ error: "Missing tier" });
+      const upperTier = tier.toUpperCase();
+      const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
+      if (existing.length > 0) {
+        await db.update(playersTable).set({ peakTier: upperTier, updatedAt: now }).where(where);
+      } else {
+        const displayName = username || discordUsername || userId;
+        await db.insert(playersTable).values({ guildId, userId, username: displayName, discordUsername, region, peakTier: upperTier, updatedAt: now });
+      }
+      return res.json({ ok: true });
+    }
+
     if (!tier) return res.status(400).json({ error: "Missing tier" });
     const upperTier = tier.toUpperCase();
+    const isHighTier = HIGH_TIERS.has(upperTier);
+    const displayName = username || discordUsername || userId;
+    const modeUpdate = buildModeUpdate(mode, upperTier);
+
+    const playerBase: typeof playersTable.$inferInsert = {
+      guildId, userId, username: displayName, discordUsername, region,
+      currentTier: upperTier, updatedAt: now, ...modeUpdate,
+    };
+    if (peakTier) playerBase.peakTier = peakTier.toUpperCase();
+
     const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
     if (existing.length > 0) {
-      await db.update(playersTable).set({ peakTier: upperTier, updatedAt: now }).where(where);
+      await db.update(playersTable).set({ ...playerBase }).where(where);
     } else {
-      const displayName = username || discordUsername || userId;
-      await db.insert(playersTable).values({ guildId, userId, username: displayName, discordUsername, region, peakTier: upperTier, updatedAt: now });
+      await db.insert(playersTable).values(playerBase);
     }
+
+    await db.insert(tierResultsTable).values({
+      guildId, userId, username: displayName, testerId, testerName,
+      tier: upperTier, mode: mode ?? null, region, ticketType, isHighTier, createdAt: now,
+    });
+
     return res.json({ ok: true });
+  } catch (err) {
+    console.error("[/api/webhook/tier] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
   }
-
-  if (!tier) return res.status(400).json({ error: "Missing tier" });
-  const upperTier = tier.toUpperCase();
-  const isHighTier = HIGH_TIERS.has(upperTier);
-  const displayName = username || discordUsername || userId;
-  const modeUpdate = buildModeUpdate(mode, upperTier);
-
-  const playerBase: typeof playersTable.$inferInsert = {
-    guildId, userId, username: displayName, discordUsername, region,
-    currentTier: upperTier, updatedAt: now, ...modeUpdate,
-  };
-  if (peakTier) playerBase.peakTier = peakTier.toUpperCase();
-
-  const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
-  if (existing.length > 0) {
-    await db.update(playersTable).set({ ...playerBase }).where(where);
-  } else {
-    await db.insert(playersTable).values(playerBase);
-  }
-
-  await db.insert(tierResultsTable).values({
-    guildId, userId, username: displayName, testerId, testerName,
-    tier: upperTier, mode: mode ?? null, region, ticketType, isHighTier, createdAt: now,
-  });
-
-  return res.json({ ok: true });
 });
 
 export default router;
