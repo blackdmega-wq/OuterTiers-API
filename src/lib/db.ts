@@ -53,13 +53,34 @@ export const tierResultsTable = pgTable("tier_results", {
 export type DbPlayer = typeof playersTable.$inferSelect;
 export type DbTierResult = typeof tierResultsTable.$inferSelect;
 
-export const pool = new Pool({
+// Parse host/port from DATABASE_URL so we can force IPv4 (family:4)
+// This avoids IPv6 connection failures on some hosting providers.
+let poolConfig: pg.PoolConfig = {
   connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 8_000,
   idleTimeoutMillis: 30_000,
   max: 10,
   ssl: { rejectUnauthorized: false },
-});
+};
+
+// Force IPv4 resolution to avoid ENETUNREACH on IPv6
+try {
+  const u = new URL(process.env.DATABASE_URL!);
+  poolConfig = {
+    ...poolConfig,
+    host: u.hostname,
+    port: Number(u.port) || 5432,
+    user: decodeURIComponent(u.username),
+    password: decodeURIComponent(u.password),
+    database: u.pathname.slice(1),
+    // @ts-ignore — 'family' is a valid net.connect option passed through by pg
+    family: 4,
+  };
+} catch {
+  // fallback: keep connectionString-only config
+}
+
+export const pool = new Pool(poolConfig);
 
 pool.on("error", (err) => {
   console.error("[DB] Unexpected pool error:", err.message);
