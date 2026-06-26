@@ -53,5 +53,15 @@ export const tierResultsTable = pgTable("tier_results", {
 export type DbPlayer = typeof playersTable.$inferSelect;
 export type DbTierResult = typeof tierResultsTable.$inferSelect;
 
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 8_000,
+  idleTimeoutMillis: 30_000,
+  max: 10,
+});
+
+pool.on("error", (err) => {
+  console.error("[DB] Unexpected pool error:", err.message);
+});
+
 export const db = drizzle(pool, { schema: { playersTable, tierResultsTable } });
