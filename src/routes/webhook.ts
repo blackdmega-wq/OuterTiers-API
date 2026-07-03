@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.js";
-import { and, eq, between, or } from "drizzle-orm";
+import { and, eq, between, desc } from "drizzle-orm";
 
 const router = Router();
 const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1"]);
