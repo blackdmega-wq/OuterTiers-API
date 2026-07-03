@@ -55,8 +55,26 @@ export const tierResultsTable = pgTable("tier_results", {
   createdAt: bigint("created_at", { mode: "number" }).notNull().$defaultFn(() => Date.now()),
 });
 
+export const punishmentsTable = pgTable("punishments", {
+  id: serial("id").primaryKey(),
+  guildId: text("guild_id").notNull(),
+  userId: text("user_id").notNull(),
+  username: text("username").notNull(),
+  type: text("type").notNull(),
+  reason: text("reason"),
+  durationMs: bigint("duration_ms", { mode: "number" }),
+  expiresAt: bigint("expires_at", { mode: "number" }),
+  active: boolean("active").notNull().default(true),
+  pardonedBy: text("pardoned_by"),
+  pardonedAt: bigint("pardoned_at", { mode: "number" }),
+  moderatorId: text("moderator_id"),
+  moderatorName: text("moderator_name"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull().$defaultFn(() => Date.now()),
+});
+
 export type DbPlayer = typeof playersTable.$inferSelect;
 export type DbTierResult = typeof tierResultsTable.$inferSelect;
+export type DbPunishment = typeof punishmentsTable.$inferSelect;
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -70,4 +88,4 @@ pool.on("error", (err) => {
   console.error("[DB] Unexpected pool error:", err.message);
 });
 
-export const db = drizzle(pool, { schema: { playersTable, tierResultsTable } });
+export const db = drizzle(pool, { schema: { playersTable, tierResultsTable, punishmentsTable } });
