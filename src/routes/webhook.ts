@@ -119,7 +119,10 @@ router.post("/webhook/bulk-results", async (req, res) => {
   let skipped = 0;
   const WINDOW = 10_000; // ±10 s dedup window
 
-  for (const r of results) {
+  // Sort ascending so the newest row is processed last — guarantees newest tier wins.
+  const sorted = [...results].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+
+  for (const r of sorted) {
     const { guildId, userId, username, tier, mode, region, ticketType, testerId, testerName, createdAt } = r;
     if (!guildId || !userId || !tier) { skipped++; continue; }
 
@@ -184,12 +187,12 @@ router.post("/webhook/bulk-results", async (req, res) => {
         .limit(1);
 
       if (existingPlayer.length > 0) {
-        // Only update mode column + username; don't overwrite currentTier with old data
-        if (Object.keys(modeUpdate).length > 0 || resolvedUsername !== userId) {
-          await db.update(playersTable)
-            .set({ username: resolvedUsername, ...modeUpdate })
-            .where(playerWhere);
-        }
+        // Update mode column + currentTier + updatedAt.
+        // Since results are sorted ascending by createdAt, the last processed row
+        // has the newest ts, so currentTier will correctly end up as the latest value.
+        await db.update(playersTable)
+          .set({ username: resolvedUsername, currentTier: upperTier, updatedAt: ts, ...modeUpdate })
+          .where(playerWhere);
       } else {
         await db.insert(playersTable).values({
           guildId, userId,
