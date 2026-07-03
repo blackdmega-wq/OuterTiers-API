@@ -169,6 +169,39 @@ router.post("/webhook/bulk-results", async (req, res) => {
         isHighTier,
         createdAt: ts,
       });
+
+      // Upsert player so /api/players/:username returns data even after a pure backfill.
+      // We set the mode-specific tier column only if the result has a mode.
+      const modeUpdate = buildModeUpdate(mode, upperTier);
+      const playerWhere = and(
+        eq(playersTable.guildId, guildId),
+        eq(playersTable.userId, userId),
+      );
+      const existingPlayer = await db
+        .select({ id: playersTable.id })
+        .from(playersTable)
+        .where(playerWhere)
+        .limit(1);
+
+      if (existingPlayer.length > 0) {
+        // Only update mode column + username; don't overwrite currentTier with old data
+        if (Object.keys(modeUpdate).length > 0 || resolvedUsername !== userId) {
+          await db.update(playersTable)
+            .set({ username: resolvedUsername, ...modeUpdate })
+            .where(playerWhere);
+        }
+      } else {
+        await db.insert(playersTable).values({
+          guildId, userId,
+          username: resolvedUsername,
+          discordUsername: null,
+          region: region ?? null,
+          currentTier: upperTier,
+          updatedAt: ts,
+          ...modeUpdate,
+        });
+      }
+
       inserted++;
     } catch (err) {
       console.error("[/api/webhook/bulk-results] row error:", (err as Error).message);
