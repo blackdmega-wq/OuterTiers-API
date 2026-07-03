@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, playersTable, tierResultsTable, type DbPlayer } from "../lib/db.js";
+import { db, playersTable, tierResultsTable, punishmentsTable, type DbPlayer } from "../lib/db.js";
 import { eq, desc } from "drizzle-orm";
 
 const router = Router();
@@ -111,6 +111,37 @@ router.get("/players/:username", async (req, res) => {
     return res.json({ ...dbPlayerToWeb(row), tierDates });
   } catch (err) {
     console.error("[/api/players/:username] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+  }
+});
+
+// ── Player history endpoint ──────────────────────────────────────────────────
+// Returns all test results and punishments for a given player.
+// Called by the PlayerProfile page on the OuterTiers website.
+
+router.get("/players/:username/history", async (req, res) => {
+  const { username } = req.params;
+  try {
+    const rows = await db.select().from(playersTable);
+    const row = rows.find(p => p.username.toLowerCase() === username.toLowerCase());
+    if (!row) return res.status(404).json({ error: "Player not found" });
+
+    const [testResults, punishments] = await Promise.all([
+      db
+        .select()
+        .from(tierResultsTable)
+        .where(eq(tierResultsTable.userId, row.userId))
+        .orderBy(desc(tierResultsTable.createdAt)),
+      db
+        .select()
+        .from(punishmentsTable)
+        .where(eq(punishmentsTable.userId, row.userId))
+        .orderBy(desc(punishmentsTable.createdAt)),
+    ]);
+
+    return res.json({ testResults, punishments });
+  } catch (err) {
+    console.error("[/api/players/:username/history] DB error:", (err as Error).message);
     return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
   }
 });
