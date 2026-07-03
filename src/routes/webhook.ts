@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { db, playersTable, tierResultsTable } from "../lib/db.js";
-import { and, eq } from "drizzle-orm";
+import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.js";
+import { and, eq, between, or } from "drizzle-orm";
 
 const router = Router();
 const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1"]);
@@ -24,6 +24,15 @@ function buildModeUpdate(mode: string | undefined, tier: string) {
   }
   return updates;
 }
+
+function requireSecret(req: any, res: any): boolean {
+  const secret = req.body?.secret as string | undefined;
+  if (!secret || secret !== process.env.WEBSITE_API_SECRET)
+    return (res.status(401).json({ error: "Unauthorized" }), false);
+  return true;
+}
+
+// ── Single tier result (posted in real-time when a test is completed) ─────────
 
 router.post("/webhook/tier", async (req, res) => {
   const { secret, type, guildId, userId, username, discordUsername,
@@ -92,6 +101,217 @@ router.post("/webhook/tier", async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error("[/api/webhook/tier] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+  }
+});
+
+// ── Bulk results backfill (used by /synctesthistory bot command) ──────────────
+// Deduplicates on (guildId, userId, mode, createdAt ±10 s).
+
+router.post("/webhook/bulk-results", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+
+  const { results } = req.body as { results?: any[] };
+  if (!Array.isArray(results) || results.length === 0)
+    return res.status(400).json({ error: "results must be a non-empty array" });
+
+  let inserted = 0;
+  let skipped = 0;
+  const WINDOW = 10_000; // ±10 s dedup window
+
+  for (const r of results) {
+    const { guildId, userId, username, tier, mode, region, ticketType, testerId, testerName, createdAt } = r;
+    if (!guildId || !userId || !tier) { skipped++; continue; }
+
+    const upperTier = String(tier).toUpperCase();
+    const isHighTier = HIGH_TIERS.has(upperTier);
+    const ts = typeof createdAt === "number" ? createdAt : Date.now();
+
+    try {
+      // Dedup: check for an existing row within ±10 s with same userId + mode
+      const existing = await db
+        .select({ id: tierResultsTable.id })
+        .from(tierResultsTable)
+        .where(
+          and(
+            eq(tierResultsTable.guildId, guildId),
+            eq(tierResultsTable.userId, userId),
+            eq(tierResultsTable.tier, upperTier),
+            mode
+              ? and(eq(tierResultsTable.mode, mode), between(tierResultsTable.createdAt, ts - WINDOW, ts + WINDOW))
+              : between(tierResultsTable.createdAt, ts - WINDOW, ts + WINDOW),
+          )
+        )
+        .limit(1);
+
+      if (existing.length > 0) { skipped++; continue; }
+
+      // Resolve username from players table if not provided
+      let resolvedUsername = username;
+      if (!resolvedUsername) {
+        const playerRows = await db
+          .select({ username: playersTable.username })
+          .from(playersTable)
+          .where(and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId)))
+          .limit(1);
+        resolvedUsername = playerRows[0]?.username ?? userId;
+      }
+
+      await db.insert(tierResultsTable).values({
+        guildId, userId,
+        username: resolvedUsername,
+        testerId: testerId ?? null,
+        testerName: testerName ?? null,
+        tier: upperTier,
+        mode: mode ?? null,
+        region: region ?? null,
+        ticketType: ticketType ?? null,
+        isHighTier,
+        createdAt: ts,
+      });
+      inserted++;
+    } catch (err) {
+      console.error("[/api/webhook/bulk-results] row error:", (err as Error).message);
+      skipped++;
+    }
+  }
+
+  return res.json({ ok: true, inserted, skipped });
+});
+
+// ── Single punishment (posted in real-time when a punishment is applied) ──────
+
+router.post("/webhook/punishment", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+
+  const { guildId, userId, username, type, reason, durationMs, expiresAt,
+          moderatorId, moderatorName, createdAt } = req.body as Record<string, any>;
+
+  if (!guildId || !userId || !type)
+    return res.status(400).json({ error: "Missing required fields: guildId, userId, type" });
+
+  try {
+    const displayName = username || userId;
+    await db.insert(punishmentsTable).values({
+      guildId, userId,
+      username: displayName,
+      type: String(type),
+      reason: reason ?? null,
+      durationMs: typeof durationMs === "number" ? durationMs : null,
+      expiresAt: typeof expiresAt === "number" ? expiresAt : null,
+      active: true,
+      pardonedBy: null,
+      pardonedAt: null,
+      moderatorId: moderatorId ?? null,
+      moderatorName: moderatorName ?? null,
+      createdAt: typeof createdAt === "number" ? createdAt : Date.now(),
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[/api/webhook/punishment] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+  }
+});
+
+// ── Bulk punishments backfill (used by /synctesthistory bot command) ──────────
+
+router.post("/webhook/bulk-punishments", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+
+  const { punishments } = req.body as { punishments?: any[] };
+  if (!Array.isArray(punishments) || punishments.length === 0)
+    return res.status(400).json({ error: "punishments must be a non-empty array" });
+
+  let inserted = 0;
+  let skipped = 0;
+  const WINDOW = 10_000;
+
+  for (const p of punishments) {
+    const { guildId, userId, username, type, reason, durationMs, expiresAt,
+            active, pardonedBy, pardonedAt, moderatorId, moderatorName, createdAt } = p;
+    if (!guildId || !userId || !type) { skipped++; continue; }
+
+    const ts = typeof createdAt === "number" ? createdAt : Date.now();
+
+    try {
+      const existing = await db
+        .select({ id: punishmentsTable.id })
+        .from(punishmentsTable)
+        .where(
+          and(
+            eq(punishmentsTable.guildId, guildId),
+            eq(punishmentsTable.userId, userId),
+            eq(punishmentsTable.type, String(type)),
+            between(punishmentsTable.createdAt, ts - WINDOW, ts + WINDOW),
+          )
+        )
+        .limit(1);
+
+      if (existing.length > 0) { skipped++; continue; }
+
+      const displayName = username || userId;
+      await db.insert(punishmentsTable).values({
+        guildId, userId,
+        username: displayName,
+        type: String(type),
+        reason: reason ?? null,
+        durationMs: typeof durationMs === "number" ? durationMs : null,
+        expiresAt: typeof expiresAt === "number" ? expiresAt : null,
+        active: active !== false,
+        pardonedBy: pardonedBy ?? null,
+        pardonedAt: typeof pardonedAt === "number" ? pardonedAt : null,
+        moderatorId: moderatorId ?? null,
+        moderatorName: moderatorName ?? null,
+        createdAt: ts,
+      });
+      inserted++;
+    } catch (err) {
+      console.error("[/api/webhook/bulk-punishments] row error:", (err as Error).message);
+      skipped++;
+    }
+  }
+
+  return res.json({ ok: true, inserted, skipped });
+});
+
+// ── Pardon (mark most recent active punishment as pardoned) ───────────────────
+
+router.post("/webhook/pardon", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+
+  const { guildId, userId, pardonedBy, pardonedAt } = req.body as Record<string, any>;
+  if (!guildId || !userId)
+    return res.status(400).json({ error: "Missing required fields: guildId, userId" });
+
+  try {
+    // Find the most recent active punishment for this user
+    const active = await db
+      .select({ id: punishmentsTable.id })
+      .from(punishmentsTable)
+      .where(
+        and(
+          eq(punishmentsTable.guildId, guildId),
+          eq(punishmentsTable.userId, userId),
+          eq(punishmentsTable.active, true),
+        )
+      )
+      .orderBy(desc(punishmentsTable.createdAt))
+      .limit(1);
+
+    if (active.length === 0) return res.json({ ok: true, updated: 0 });
+
+    await db
+      .update(punishmentsTable)
+      .set({
+        active: false,
+        pardonedBy: pardonedBy ?? null,
+        pardonedAt: typeof pardonedAt === "number" ? pardonedAt : Date.now(),
+      })
+      .where(eq(punishmentsTable.id, active[0].id));
+
+    return res.json({ ok: true, updated: 1 });
+  } catch (err) {
+    console.error("[/api/webhook/pardon] DB error:", (err as Error).message);
     return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
   }
 });
