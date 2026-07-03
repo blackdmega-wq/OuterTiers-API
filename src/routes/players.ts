@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db, playersTable, tierResultsTable, punishmentsTable, type DbPlayer } from "../lib/db.js";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, sql } from "drizzle-orm";
 
 const router = Router();
 
@@ -122,22 +122,33 @@ router.get("/players/:username", async (req, res) => {
 router.get("/players/:username/history", async (req, res) => {
   const { username } = req.params;
   try {
-    const rows = await db.select().from(playersTable);
-    const row = rows.find(p => p.username.toLowerCase() === username.toLowerCase());
-    if (!row) return res.status(404).json({ error: "Player not found" });
+    // First try to find the player in the players table (for userId-based lookup)
+    const playerRows = await db.select().from(playersTable);
+    const player = playerRows.find(p => p.username.toLowerCase() === username.toLowerCase());
 
+    // Query tier_results and punishments by userId if player exists, otherwise by username directly.
+    // This ensures results are returned even if the player isn't in the players table yet
+    // (e.g. history was backfilled via /synctesthistory before the player was registered).
     const [testResults, punishments] = await Promise.all([
-      db
-        .select()
-        .from(tierResultsTable)
-        .where(eq(tierResultsTable.userId, row.userId))
-        .orderBy(desc(tierResultsTable.createdAt)),
-      db
-        .select()
-        .from(punishmentsTable)
-        .where(eq(punishmentsTable.userId, row.userId))
-        .orderBy(desc(punishmentsTable.createdAt)),
+      player
+        ? db.select().from(tierResultsTable)
+            .where(eq(tierResultsTable.userId, player.userId))
+            .orderBy(desc(tierResultsTable.createdAt))
+        : db.select().from(tierResultsTable)
+            .where(sql`lower(${tierResultsTable.username}) = ${username.toLowerCase()}`)
+            .orderBy(desc(tierResultsTable.createdAt)),
+      player
+        ? db.select().from(punishmentsTable)
+            .where(eq(punishmentsTable.userId, player.userId))
+            .orderBy(desc(punishmentsTable.createdAt))
+        : db.select().from(punishmentsTable)
+            .where(sql`lower(${punishmentsTable.username}) = ${username.toLowerCase()}`)
+            .orderBy(desc(punishmentsTable.createdAt)),
     ]);
+
+    if (!player && testResults.length === 0 && punishments.length === 0) {
+      return res.status(404).json({ error: "Player not found" });
+    }
 
     return res.json({ testResults, punishments });
   } catch (err) {
