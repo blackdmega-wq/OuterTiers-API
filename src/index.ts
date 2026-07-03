@@ -45,6 +45,24 @@ async function ensureSchema() {
       created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::BIGINT
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS punishments (
+      id SERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      type TEXT NOT NULL,
+      reason TEXT,
+      duration_ms BIGINT,
+      expires_at BIGINT,
+      active BOOLEAN NOT NULL DEFAULT true,
+      pardoned_by TEXT,
+      pardoned_at BIGINT,
+      moderator_id TEXT,
+      moderator_name TEXT,
+      created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::BIGINT
+    )
+  `);
   logger.info("DB schema ready");
 }
 
