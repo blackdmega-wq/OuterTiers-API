@@ -108,7 +108,22 @@ router.get("/players/:username", async (req, res) => {
       }
     }
 
-    return res.json({ ...dbPlayerToWeb(row), tierDates });
+    // Compute per-mode peak tier from full test history
+    const PEAK_TIER_ORDER = ['HT1','LT1','HT2','LT2','HT3','LT3','HT4','LT4','HT5','LT5'];
+    const peakTiers: Record<string, string> = {};
+    for (const [mode, results] of Object.entries(modeHistory)) {
+      let best: string | null = null;
+      for (const r of results) {
+        if (!r.tier) continue;
+        const ut = r.tier.toUpperCase();
+        const rank = PEAK_TIER_ORDER.indexOf(ut);
+        if (rank === -1) continue;
+        if (best === null || rank < PEAK_TIER_ORDER.indexOf(best)) best = ut;
+      }
+      if (best) peakTiers[mode] = best;
+    }
+
+    return res.json({ ...dbPlayerToWeb(row), tierDates, peakTiers });
   } catch (err) {
     console.error("[/api/players/:username] DB error:", (err as Error).message);
     return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
