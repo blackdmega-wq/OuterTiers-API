@@ -74,6 +74,17 @@ router.post("/webhook/tier", async (req, res) => {
       return res.json({ ok: true });
     }
 
+    // ── Update username only (called by IGN auto-sync when a rename is detected) ──
+    if (type === "update-username") {
+      if (!username) return res.status(400).json({ error: "Missing username" });
+      const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
+      if (existing.length > 0) {
+        await db.update(playersTable).set({ username, updatedAt: now }).where(where);
+      }
+      // If player not in website DB yet (no test results) — nothing to update, that's fine.
+      return res.json({ ok: true });
+    }
+
     if (!tier) return res.status(400).json({ error: "Missing tier" });
     const upperTier = tier.toUpperCase();
     const isHighTier = HIGH_TIERS.has(upperTier);
