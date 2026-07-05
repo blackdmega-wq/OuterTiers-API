@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.js";
-import { and, eq, between, desc } from "drizzle-orm";
+import { and, eq, between, desc, isNull } from "drizzle-orm";
 
 const router = Router();
 const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1"]);
@@ -361,6 +361,45 @@ router.post("/webhook/pardon", async (req, res) => {
     console.error("[/api/webhook/pardon] DB error:", (err as Error).message);
     return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
   }
+});
+
+// ── Patch missing mode on existing null-mode tier_results rows ───────────────
+// Used by /fixresultmodes bot command to backfill gamemodes from ticket records.
+router.post("/webhook/fix-result-modes", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+
+  const { updates } = req.body as { updates?: any[] };
+  if (!Array.isArray(updates) || updates.length === 0)
+    return res.status(400).json({ error: "updates must be a non-empty array" });
+
+  let patched = 0;
+  let skipped = 0;
+  const WINDOW = 15_000; // ±15 s match window
+
+  for (const u of updates) {
+    const { userId, createdAt, mode } = u;
+    if (!userId || !createdAt || !mode) { skipped++; continue; }
+    const ts = Number(createdAt);
+    try {
+      const result = await db
+        .update(tierResultsTable)
+        .set({ mode: String(mode).toLowerCase() })
+        .where(
+          and(
+            eq(tierResultsTable.userId, userId),
+            isNull(tierResultsTable.mode),
+            between(tierResultsTable.createdAt, ts - WINDOW, ts + WINDOW),
+          )
+        );
+      const count = (result as any).rowCount ?? 0;
+      if (count > 0) patched += count; else skipped++;
+    } catch (err) {
+      console.error("[/api/webhook/fix-result-modes] error:", (err as Error).message);
+      skipped++;
+    }
+  }
+
+  return res.json({ ok: true, patched, skipped });
 });
 
 export default router;
