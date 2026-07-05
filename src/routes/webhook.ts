@@ -377,15 +377,17 @@ router.post("/webhook/fix-result-modes", async (req, res) => {
   const WINDOW = 15_000; // ±15 s match window
 
   for (const u of updates) {
-    const { userId, createdAt, mode } = u;
-    if (!userId || !createdAt || !mode) { skipped++; continue; }
-    const ts = Number(createdAt);
+    const { guildId, userId, createdAt, mode } = u;
+    if (!guildId || !userId || !createdAt || !mode) { skipped++; continue; }
+    // Normalise timestamp: bot may send seconds or ms — anything <1e12 is seconds
+    const ts = Number(createdAt) < 1e12 ? Number(createdAt) * 1000 : Number(createdAt);
     try {
       const result = await db
         .update(tierResultsTable)
         .set({ mode: String(mode).toLowerCase() })
         .where(
           and(
+            eq(tierResultsTable.guildId, guildId),
             eq(tierResultsTable.userId, userId),
             isNull(tierResultsTable.mode),
             between(tierResultsTable.createdAt, ts - WINDOW, ts + WINDOW),
