@@ -120,7 +120,13 @@ router.get("/players/:username", async (req, res) => {
         if (rank === -1) continue;
         if (best === null || rank < PEAK_TIER_ORDER.indexOf(best)) best = ut;
       }
-      if (best) peakTiers[mode] = best;
+      if (best) {
+        // Normalise 'crystal'→'vanilla' to match frontend category ids (CATEGORIES uses 'vanilla' for Crystal)
+        const normMode = mode === 'crystal' ? 'vanilla' : mode;
+        if (!peakTiers[normMode] || PEAK_TIER_ORDER.indexOf(best) < PEAK_TIER_ORDER.indexOf(peakTiers[normMode])) {
+          peakTiers[normMode] = best;
+        }
+      }
     }
 
     return res.json({ ...dbPlayerToWeb(row), tierDates, peakTiers });
