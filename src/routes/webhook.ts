@@ -38,7 +38,7 @@ function requireSecret(req: any, res: any): boolean {
 
 router.post("/webhook/tier", async (req, res) => {
   const { secret, type, guildId, userId, username, discordUsername,
-          tier, peakTier, mode, region, testerId, testerName, ticketType }
+          tier, peakTier, mode, region, testerId, testerName, ticketType, scope }
     = req.body as Record<string, string | undefined>;
 
   if (!secret || secret !== process.env.WEBSITE_API_SECRET)
@@ -59,6 +59,17 @@ router.post("/webhook/tier", async (req, res) => {
           nethopTier: null, smpTier: null, swordTier: null, axeTier: null,
           maceTier: null, speedTier: null, updatedAt: now,
         }).where(where);
+      }
+
+      // Full wipes ("all tiers") also need to remove the player's raw test
+      // history — the profile page computes "peak tier" per mode live from
+      // tierResultsTable, independent of the playersTable columns above. If
+      // we only clear the columns, old HT/LT results still make the peak
+      // badge (e.g. "HT5 nethop") reappear even though currentTier is null.
+      // Punishments are moderation records, not tier data, so they're left
+      // alone here (that's what /deletetesthistory is for).
+      if (!scope || scope === "all") {
+        await db.delete(tierResultsTable).where(eq(tierResultsTable.userId, userId));
       }
       return res.json({ ok: true });
     }
