@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { syncAllPlayers } from "../lib/mojangSync.js";
 import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.js";
-import { and, eq, desc, sql, ilike } from "drizzle-orm";
+import { and, eq, desc, sql, ilike, or, inArray } from "drizzle-orm";
 
 const router = Router();
 
@@ -126,22 +126,19 @@ router.delete("/admin/players/:username/history", async (req, res) => {
   const { username } = req.params;
   if (!username) return res.status(400).json({ error: "Missing username" });
   try {
-    const usernameMatch = sql`lower(${tierResultsTable.username}) = ${username.toLowerCase()}`;
-    const punishmentMatch = sql`lower(${punishmentsTable.username}) = ${username.toLowerCase()}`;
-
     // Also match by userId in case the player's username changed since some
     // results were recorded (results/punishments are keyed by userId).
     const playerRows = await db.select({ userId: playersTable.userId })
       .from(playersTable)
-      .where(sql`lower(${playersTable.username}) = ${username.toLowerCase()}`);
+      .where(ilike(playersTable.username, username));
     const userIds = playerRows.map(p => p.userId);
 
     const resultsWhere = userIds.length
-      ? sql`(${usernameMatch}) OR ${tierResultsTable.userId} = ANY(${userIds})`
-      : usernameMatch;
+      ? or(ilike(tierResultsTable.username, username), inArray(tierResultsTable.userId, userIds))
+      : ilike(tierResultsTable.username, username);
     const punishmentsWhere = userIds.length
-      ? sql`(${punishmentMatch}) OR ${punishmentsTable.userId} = ANY(${userIds})`
-      : punishmentMatch;
+      ? or(ilike(punishmentsTable.username, username), inArray(punishmentsTable.userId, userIds))
+      : ilike(punishmentsTable.username, username);
 
     const [resultsDeleted, punishmentsDeleted] = await Promise.all([
       db.delete(tierResultsTable).where(resultsWhere),
@@ -157,8 +154,8 @@ router.delete("/admin/players/:username/history", async (req, res) => {
 
     return res.json({ ok: true, resultsDeleted: resultsCount, punishmentsDeleted: punishmentsCount });
   } catch (err) {
-    console.error("[/api/admin/players/:username/history] DB error:", (err as Error).message);
-    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+    console.error("[/api/admin/players/:username/history] DB error:", (err as Error).message, (err as Error).stack);
+    return res.status(500).json({ error: "Failed to delete player history.", detail: (err as Error).message });
   }
 });
 
