@@ -3,7 +3,9 @@ import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.
 import { and, eq, between, desc, isNull } from "drizzle-orm";
 
 const router = Router();
-const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1"]);
+// Includes retired variants (R-prefixed, set by /retire) so retired players
+// keep showing up in the "High Tier" feed instead of disappearing from it.
+const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1", "RLT2", "RHT2", "RLT1", "RHT1"]);
 
 type ModeKey = "sword"|"speed"|"pot"|"nethop"|"ogvanilla"|"vanilla"|"uhc"|"axe"|"mace"|"smp";
 

@@ -2,6 +2,7 @@ import app from "./app.js";
 import { logger } from "./lib/logger.js";
 import { syncAllPlayers } from "./lib/mojangSync.js";
 import { pool } from "./lib/db.js";
+import { backfillHighTier } from "./lib/backfillHighTier.js";
 
 async function ensureSchema() {
   await pool.query(`
@@ -80,6 +81,8 @@ ensureSchema().then(() => {
     setTimeout(() => {
       syncAllPlayers().catch(err => logger.error({ err }, "Startup Mojang sync failed"));
     }, 5_000);
+
+    backfillHighTier().catch(err => logger.error({ err }, "Startup high-tier backfill failed"));
 
     setInterval(() => {
       syncAllPlayers().catch(err => logger.error({ err }, "Scheduled Mojang sync failed"));
