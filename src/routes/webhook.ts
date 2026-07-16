@@ -27,6 +27,25 @@ function buildModeUpdate(mode: string | undefined, tier: string) {
   return updates;
 }
 
+/** Sets only the column for the given mode to null. Returns {} for unknown modes. */
+function buildModeWipe(mode: string | undefined): Partial<typeof playersTable.$inferInsert> {
+  if (!mode) return {};
+  const updates: Partial<typeof playersTable.$inferInsert> = {};
+  switch (mode as ModeKey) {
+    case "sword":     updates.swordTier    = null; break;
+    case "speed":     updates.speedTier    = null; break;
+    case "pot":       updates.potTier      = null; break;
+    case "nethop":    updates.nethopTier   = null; break;
+    case "ogvanilla": updates.ogvanillaTier= null; break;
+    case "vanilla":   updates.vanillaTier  = null; break;
+    case "uhc":       updates.uhcTier      = null; break;
+    case "axe":       updates.axeTier      = null; break;
+    case "mace":      updates.maceTier     = null; break;
+    case "smp":       updates.smpTier      = null; break;
+  }
+  return updates;
+}
+
 function requireSecret(req: any, res: any): boolean {
   const secret = req.body?.secret as string | undefined;
   if (!secret || secret !== process.env.WEBSITE_API_SECRET)
@@ -53,12 +72,43 @@ router.post("/webhook/tier", async (req, res) => {
     if (type === "tierwipe") {
       const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
       if (existing.length > 0) {
-        await db.update(playersTable).set({
-          currentTier: null, peakTier: null,
-          ogvanillaTier: null, vanillaTier: null, uhcTier: null, potTier: null,
-          nethopTier: null, smpTier: null, swordTier: null, axeTier: null,
-          maceTier: null, speedTier: null, updatedAt: now,
-        }).where(where);
+        if (scope === "mode" && mode) {
+          // Scope = specific gamemode: only null out that one mode's tier column.
+          // Leave every other tier column (and currentTier / peakTier) intact.
+          const modeWipe = buildModeWipe(mode);
+          if (Object.keys(modeWipe).length > 0) {
+            await db.update(playersTable).set({ ...modeWipe, updatedAt: now }).where(where);
+          }
+        } else if (scope === "specific" && tier) {
+          // Scope = specific tier level: only null out columns that currently hold
+          // that exact tier value — leave columns with different tiers untouched.
+          const upperTierToWipe = tier.toUpperCase();
+          const rows = await db.select().from(playersTable).where(where).limit(1);
+          if (rows.length > 0) {
+            const p = rows[0];
+            const update: Partial<typeof playersTable.$inferInsert> = { updatedAt: now };
+            if (p.currentTier === upperTierToWipe) update.currentTier = null;
+            if (p.swordTier    === upperTierToWipe) update.swordTier    = null;
+            if (p.speedTier    === upperTierToWipe) update.speedTier    = null;
+            if (p.potTier      === upperTierToWipe) update.potTier      = null;
+            if (p.nethopTier   === upperTierToWipe) update.nethopTier   = null;
+            if (p.ogvanillaTier=== upperTierToWipe) update.ogvanillaTier= null;
+            if (p.vanillaTier  === upperTierToWipe) update.vanillaTier  = null;
+            if (p.uhcTier      === upperTierToWipe) update.uhcTier      = null;
+            if (p.axeTier      === upperTierToWipe) update.axeTier      = null;
+            if (p.maceTier     === upperTierToWipe) update.maceTier     = null;
+            if (p.smpTier      === upperTierToWipe) update.smpTier      = null;
+            await db.update(playersTable).set(update).where(where);
+          }
+        } else {
+          // scope === "all" or no scope: wipe every tier column.
+          await db.update(playersTable).set({
+            currentTier: null, peakTier: null,
+            ogvanillaTier: null, vanillaTier: null, uhcTier: null, potTier: null,
+            nethopTier: null, smpTier: null, swordTier: null, axeTier: null,
+            maceTier: null, speedTier: null, updatedAt: now,
+          }).where(where);
+        }
       }
 
       // Full wipes ("all tiers") also need to remove the player's raw test
