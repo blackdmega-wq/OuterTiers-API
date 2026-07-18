@@ -148,6 +148,18 @@ router.post("/webhook/tier", async (req, res) => {
       return res.json({ ok: true });
     }
 
+    // ── Un-retire: restore an active tier from a retired marker ──────────────
+    if (type === "unretire") {
+      if (!mode || !tier) return res.status(400).json({ error: "Missing mode or tier for unretire" });
+      const activeTier = tier.toUpperCase();
+      const modeUpdate = buildModeUpdate(mode, activeTier);
+      const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
+      if (existing.length > 0) {
+        await db.update(playersTable).set({ currentTier: activeTier, updatedAt: now, ...modeUpdate }).where(where);
+      }
+      return res.json({ ok: true });
+    }
+
     if (!tier) return res.status(400).json({ error: "Missing tier" });
     const upperTier = tier.toUpperCase();
     const isHighTier = HIGH_TIERS.has(upperTier);
