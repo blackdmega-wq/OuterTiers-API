@@ -479,4 +479,81 @@ router.post("/webhook/fix-result-modes", async (req, res) => {
   return res.json({ ok: true, patched, skipped });
 });
 
+
+// ── Discord account transfer (migrate tiers + history from old Discord ID to new one) ─
+// Called when a player loses their Discord account and verifies on a new one.
+// The admin runs /transferaccount @OldDiscord @NewDiscord to trigger this.
+router.post("/webhook/account-transfer", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+
+  const { guildId, oldUserId, newUserId } = req.body as Record<string, string | undefined>;
+
+  if (!guildId || !oldUserId || !newUserId)
+    return res.status(400).json({ error: "Missing required fields: guildId, oldUserId, newUserId" });
+  if (oldUserId === newUserId)
+    return res.status(400).json({ error: "oldUserId and newUserId must be different" });
+
+  try {
+    const oldWhere = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, oldUserId));
+    const newWhere = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, newUserId));
+    const now = Date.now();
+
+    // 1. Find old player record — it must exist
+    const oldRows = await db.select().from(playersTable).where(oldWhere).limit(1);
+    if (oldRows.length === 0)
+      return res.status(404).json({ error: "Old player record not found in website database" });
+
+    const old = oldRows[0];
+
+    // 2. Upsert new player record with all of the old player's tier data
+    const mergedRecord: typeof playersTable.$inferInsert = {
+      guildId,
+      userId:          newUserId,
+      username:        old.username,
+      discordUsername: old.discordUsername,
+      region:          old.region,
+      currentTier:     old.currentTier,
+      peakTier:        old.peakTier,
+      ogvanillaTier:   old.ogvanillaTier,
+      vanillaTier:     old.vanillaTier,
+      uhcTier:         old.uhcTier,
+      potTier:         old.potTier,
+      nethopTier:      old.nethopTier,
+      smpTier:         old.smpTier,
+      swordTier:       old.swordTier,
+      axeTier:         old.axeTier,
+      maceTier:        old.maceTier,
+      speedTier:       old.speedTier,
+      updatedAt:       now,
+    };
+
+    const newRows = await db.select({ id: playersTable.id }).from(playersTable).where(newWhere).limit(1);
+    if (newRows.length > 0) {
+      await db.update(playersTable).set(mergedRecord).where(newWhere);
+    } else {
+      await db.insert(playersTable).values(mergedRecord);
+    }
+
+    // 3. Re-assign all tier_results rows from old userId to new userId
+    await db.update(tierResultsTable)
+      .set({ userId: newUserId })
+      .where(and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, oldUserId)));
+
+    // 4. Re-assign all punishments rows from old userId to new userId
+    await db.update(punishmentsTable)
+      .set({ userId: newUserId })
+      .where(and(eq(punishmentsTable.guildId, guildId), eq(punishmentsTable.userId, oldUserId)));
+
+    // 5. Delete the old player record — it is now a stale duplicate
+    await db.delete(playersTable).where(oldWhere);
+
+    console.log(`[/api/webhook/account-transfer] Transferred ${oldUserId} -> ${newUserId} in guild ${guildId} (IGN: ${old.username})`);
+    return res.json({ ok: true, transferred: true, username: old.username });
+  } catch (err) {
+    console.error("[/api/webhook/account-transfer] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+  }
+});
+
 export default router;
+
