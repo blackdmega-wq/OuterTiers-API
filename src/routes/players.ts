@@ -101,7 +101,21 @@ router.get("/players/:username", async (req, res) => {
     // Find all rows matching this username, then pick the richest one (most tier data).
     // This prevents a stale ghost row (old Discord ID, no tiers) from shadowing the
     // real row when Array.find() would otherwise return whichever came first in the DB.
-    const matches = rows.filter(p => p.username.toLowerCase() === username.toLowerCase());
+    let matches = rows.filter(p => p.username.toLowerCase() === username.toLowerCase());
+
+    // UUID fallback: if no username match and the identifier looks like a UUID
+    // (32 hex chars, no dashes), try matching by the uuid column.
+    // This lets the TierTagger mod look up players by Minecraft UUID even if their
+    // in-game name doesn't match the stored username (e.g. after a name change).
+    if (matches.length === 0) {
+      const normalized = username.replace(/-/g, "").toLowerCase();
+      if (/^[0-9a-f]{32}$/.test(normalized)) {
+        matches = rows.filter(
+          p => p.uuid && p.uuid.replace(/-/g, "").toLowerCase() === normalized
+        );
+      }
+    }
+
     const row = matches.length > 1
       ? matches.reduce((best, cur) =>
           tierScore(cur) > tierScore(best) ||
