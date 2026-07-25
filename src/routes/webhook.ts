@@ -172,9 +172,23 @@ router.post("/webhook/tier", async (req, res) => {
     };
     if (peakTier) playerBase.peakTier = peakTier.toUpperCase();
 
-    const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
-    if (existing.length > 0) {
-      await db.update(playersTable).set({ ...playerBase }).where(where);
+    const existingRows = await db.select().from(playersTable).where(where).limit(1);
+    if (existingRows.length > 0) {
+      const existingRow = existingRows[0];
+      const updateData: Partial<typeof playersTable.$inferInsert> = { ...playerBase };
+
+      // Never overwrite a real MC IGN with a Discord-username or userId fallback.
+      // A "real" IGN is anything stored that isn't the bare userId string.
+      // This prevents /migrate (run before the player verified their MC account)
+      // from corrupting the username that real test results already stored.
+      const hasRealExistingUsername = existingRow.username && existingRow.username !== userId;
+      const newNameIsRealIGN = username && username !== discordUsername && username !== userId;
+      if (hasRealExistingUsername && !newNameIsRealIGN) {
+        // Keep the stored username — the incoming value is a fallback, not an IGN.
+        delete updateData.username;
+      }
+
+      await db.update(playersTable).set(updateData).where(where);
     } else {
       await db.insert(playersTable).values(playerBase);
     }

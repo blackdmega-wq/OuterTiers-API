@@ -50,10 +50,43 @@ function dbPlayerToWeb(p: DbPlayer) {
   };
 }
 
+/** Count non-null tier columns — used to prefer the "richer" row when deduplicating. */
+function tierScore(p: DbPlayer): number {
+  return [p.ogvanillaTier, p.vanillaTier, p.uhcTier, p.potTier, p.nethopTier,
+          p.smpTier, p.swordTier, p.axeTier, p.maceTier, p.speedTier, p.currentTier]
+    .filter(Boolean).length;
+}
+
+/**
+ * Deduplicate a set of player rows by username (case-insensitive).
+ * When multiple rows share a username, keep the one with the most tier data
+ * (highest tierScore), falling back to the most recently updated row.
+ * This handles the ghost-row problem where an old userId ends up with the
+ * same IGN as the current account but no tier data.
+ */
+function deduplicateByUsername(rows: DbPlayer[]): DbPlayer[] {
+  const best = new Map<string, DbPlayer>();
+  for (const row of rows) {
+    const key = row.username.toLowerCase();
+    const existing = best.get(key);
+    if (!existing) { best.set(key, row); continue; }
+    const existingScore = tierScore(existing);
+    const rowScore = tierScore(row);
+    if (rowScore > existingScore || (rowScore === existingScore && row.updatedAt > existing.updatedAt)) {
+      best.set(key, row);
+    }
+  }
+  return [...best.values()];
+}
+
 router.get("/players", async (_req, res) => {
   try {
     const rows = await db.select().from(playersTable);
-    const players = rows.map(dbPlayerToWeb).sort((a, b) => b.points - a.points);
+    // Deduplicate: if the same IGN appears under two different Discord IDs (ghost
+    // rows from old accounts or backfills), expose only the richest row so the
+    // player list never shows the same name twice.
+    const deduped = deduplicateByUsername(rows);
+    const players = deduped.map(dbPlayerToWeb).sort((a, b) => b.points - a.points);
     return res.json({ players });
   } catch (err) {
     console.error("[/api/players] DB error:", (err as Error).message);
@@ -65,7 +98,16 @@ router.get("/players/:username", async (req, res) => {
   const { username } = req.params;
   try {
     const rows = await db.select().from(playersTable);
-    const row = rows.find(p => p.username.toLowerCase() === username.toLowerCase());
+    // Find all rows matching this username, then pick the richest one (most tier data).
+    // This prevents a stale ghost row (old Discord ID, no tiers) from shadowing the
+    // real row when Array.find() would otherwise return whichever came first in the DB.
+    const matches = rows.filter(p => p.username.toLowerCase() === username.toLowerCase());
+    const row = matches.length > 1
+      ? matches.reduce((best, cur) =>
+          tierScore(cur) > tierScore(best) ||
+          (tierScore(cur) === tierScore(best) && cur.updatedAt > best.updatedAt)
+            ? cur : best)
+      : matches[0];
     if (!row) return res.status(404).json({ error: "Player not found" });
 
     const history = await db

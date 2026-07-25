@@ -159,4 +159,114 @@ router.delete("/admin/players/:username/history", async (req, res) => {
   }
 });
 
+// ── Duplicate player inspection + cleanup ────────────────────────────────────
+
+/**
+ * GET /api/admin/players/duplicates
+ * Returns all username groups that appear more than once in the players table.
+ * Use this to identify ghost rows (same IGN, different Discord userId).
+ */
+router.get("/admin/players/duplicates", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+  try {
+    const rows = await db.select().from(playersTable);
+    const byUsername = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const key = row.username.toLowerCase();
+      if (!byUsername.has(key)) byUsername.set(key, []);
+      byUsername.get(key)!.push(row);
+    }
+    const duplicates: Record<string, object[]> = {};
+    for (const [name, group] of byUsername) {
+      if (group.length > 1) {
+        duplicates[name] = group.map(r => ({
+          id: r.id,
+          userId: r.userId,
+          username: r.username,
+          updatedAt: r.updatedAt,
+          currentTier: r.currentTier,
+          tierCount: [r.ogvanillaTier, r.vanillaTier, r.uhcTier, r.potTier,
+                      r.nethopTier, r.smpTier, r.swordTier, r.axeTier,
+                      r.maceTier, r.speedTier].filter(Boolean).length,
+        }));
+      }
+    }
+    return res.json({ duplicateCount: Object.keys(duplicates).length, duplicates });
+  } catch (err) {
+    console.error("[/api/admin/players/duplicates] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable." });
+  }
+});
+
+/**
+ * DELETE /api/admin/players/by-userid
+ * Body: { secret, guildId, userId }
+ * Deletes a specific player row by (guildId, userId). Use to remove ghost/stale
+ * duplicate rows identified via GET /api/admin/players/duplicates.
+ * Does NOT delete tier_results or punishments (those stay for history).
+ */
+router.delete("/admin/players/by-userid", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+  const { guildId, userId } = req.body as Record<string, string | undefined>;
+  if (!guildId || !userId) return res.status(400).json({ error: "Missing guildId or userId" });
+  try {
+    const where = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId));
+    const existing = await db.select({ id: playersTable.id, username: playersTable.username })
+      .from(playersTable).where(where).limit(1);
+    if (!existing.length) return res.status(404).json({ error: "Player row not found" });
+    await db.delete(playersTable).where(where);
+    console.log(`[admin] Deleted player row: guildId=${guildId} userId=${userId} username=${existing[0].username}`);
+    return res.json({ ok: true, deleted: { userId, username: existing[0].username } });
+  } catch (err) {
+    console.error("[/api/admin/players/by-userid] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable." });
+  }
+});
+
+/**
+ * POST /api/admin/players/deduplicate
+ * Body: { secret }
+ * Auto-deduplicates ALL duplicate username groups in one call.
+ * For each group, keeps the row with the most tier data (highest tier column count),
+ * falling back to the most recently updated. Deletes the rest.
+ * Returns a summary of what was removed.
+ */
+router.post("/admin/players/deduplicate", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+  try {
+    const rows = await db.select().from(playersTable);
+    const byUsername = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const key = row.username.toLowerCase();
+      if (!byUsername.has(key)) byUsername.set(key, []);
+      byUsername.get(key)!.push(row);
+    }
+
+    const tierCount = (r: typeof rows[number]) =>
+      [r.ogvanillaTier, r.vanillaTier, r.uhcTier, r.potTier,
+       r.nethopTier, r.smpTier, r.swordTier, r.axeTier,
+       r.maceTier, r.speedTier, r.currentTier].filter(Boolean).length;
+
+    const deleted: object[] = [];
+    for (const [, group] of byUsername) {
+      if (group.length <= 1) continue;
+      // Sort: most tiers first, most recent as tiebreaker
+      group.sort((a, b) =>
+        tierCount(b) - tierCount(a) || b.updatedAt - a.updatedAt
+      );
+      const [keep, ...remove] = group;
+      for (const row of remove) {
+        await db.delete(playersTable)
+          .where(and(eq(playersTable.guildId, row.guildId), eq(playersTable.userId, row.userId)));
+        deleted.push({ userId: row.userId, username: row.username, keptUserId: keep.userId });
+        console.log(`[admin/deduplicate] Removed ghost row userId=${row.userId} username=${row.username}, kept userId=${keep.userId}`);
+      }
+    }
+    return res.json({ ok: true, removedCount: deleted.length, removed: deleted });
+  } catch (err) {
+    console.error("[/api/admin/players/deduplicate] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable." });
+  }
+});
+
 export default router;
