@@ -178,13 +178,17 @@ router.post("/webhook/tier", async (req, res) => {
       const updateData: Partial<typeof playersTable.$inferInsert> = { ...playerBase };
 
       // Never overwrite a real MC IGN with a Discord-username or userId fallback.
-      // A "real" IGN is anything stored that isn't the bare userId string.
-      // This prevents /migrate (run before the player verified their MC account)
-      // from corrupting the username that real test results already stored.
-      const hasRealExistingUsername = existingRow.username && existingRow.username !== userId;
-      const newNameIsRealIGN = username && username !== discordUsername && username !== userId;
+      // A "real" Minecraft IGN matches the Mojang name rules: 3-16 alphanumeric/underscore chars.
+      // If the stored username fails this check (e.g. a Discord display name like
+      // "Player | Dont @ for test" was accidentally saved), always allow a valid IGN to fix it.
+      const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
+      const hasRealExistingUsername =
+        existingRow.username &&
+        existingRow.username !== userId &&
+        MC_NAME_RE.test(existingRow.username);
+      const newNameIsRealIGN = username && MC_NAME_RE.test(username);
       if (hasRealExistingUsername && !newNameIsRealIGN) {
-        // Keep the stored username — the incoming value is a fallback, not an IGN.
+        // Keep the stored username — the incoming value is a fallback, not a real IGN.
         delete updateData.username;
       }
 
