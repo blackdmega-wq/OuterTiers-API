@@ -39,6 +39,29 @@ router.post("/admin/fix-username", async (req, res) => {
   return res.json({ ok: true, newUsername });
 });
 
+/**
+ * Fix a player's username by matching on their current (wrong) stored username.
+ * Useful when a Discord display name was accidentally saved instead of the MC IGN.
+ * Body: { secret, oldUsername, newUsername }
+ */
+router.post("/admin/fix-username-by-display", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+  const { oldUsername, newUsername } = req.body as Record<string, string | undefined>;
+  if (!oldUsername || !newUsername) {
+    return res.status(400).json({ error: "Missing oldUsername or newUsername" });
+  }
+  const rows = await db
+    .select({ id: playersTable.id, userId: playersTable.userId })
+    .from(playersTable)
+    .where(ilike(playersTable.username, oldUsername))
+    .limit(10);
+  if (!rows.length) return res.status(404).json({ error: "No player found with that username" });
+  await db.update(playersTable)
+    .set({ username: newUsername, updatedAt: Date.now() })
+    .where(ilike(playersTable.username, oldUsername));
+  return res.json({ ok: true, fixed: rows.length, newUsername });
+});
+
 // ── Admin history GUI: list all test results (paginated, optional search) ────
 // GET /api/admin/results?search=<username>&limit=50&offset=0
 router.get("/admin/results", async (req, res) => {
