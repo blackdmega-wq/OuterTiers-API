@@ -94,6 +94,27 @@ router.get("/players", async (_req, res) => {
   }
 });
 
+// Discord ID lookup — called by the bot's /startqueue tier check when no IGN is linked.
+// Must be defined BEFORE /players/:username so Express does not treat "by-discord" as a username.
+router.get("/players/by-discord/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const rows = await db.select().from(playersTable);
+    const matches = rows.filter(p => p.userId === userId);
+    if (matches.length === 0) return res.status(404).json({ error: "Player not found" });
+    // When a user appears under multiple guild IDs, pick the row with the most tier data,
+    // falling back to the most recently updated row.
+    const row = matches.reduce((best, cur) =>
+      tierScore(cur) > tierScore(best) ||
+      (tierScore(cur) === tierScore(best) && cur.updatedAt > best.updatedAt)
+        ? cur : best);
+    return res.json(dbPlayerToWeb(row));
+  } catch (err) {
+    console.error("[/api/players/by-discord/:userId] DB error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+  }
+});
+
 router.get("/players/:username", async (req, res) => {
   const { username } = req.params;
   try {
