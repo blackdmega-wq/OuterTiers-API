@@ -142,9 +142,17 @@ router.post("/webhook/tier", async (req, res) => {
       if (!username) return res.status(400).json({ error: "Missing username" });
       const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
       if (existing.length > 0) {
-        await db.update(playersTable).set({ username, updatedAt: now }).where(where);
+        const playerUpdate: Partial<typeof playersTable.$inferInsert> = { username, updatedAt: now };
+        if (uuid) playerUpdate.uuid = uuid;
+        await db.update(playersTable).set(playerUpdate).where(where);
       }
-      // If player not in website DB yet (no test results) — nothing to update, that's fine.
+      // History is keyed by Discord userId; update denormalized names after MC renames.
+      await db.update(tierResultsTable).set({ username }).where(
+        and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, userId)),
+      );
+      await db.update(punishmentsTable).set({ username }).where(
+        and(eq(punishmentsTable.guildId, guildId), eq(punishmentsTable.userId, userId)),
+      );
       return res.json({ ok: true });
     }
 
