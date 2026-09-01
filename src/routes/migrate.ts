@@ -7,6 +7,7 @@ interface MigratePlayer {
   guildId: string;
   userId: string;
   username: string;
+  uuid?: string | null;
   currentTier?: string | null;
   peakTier?: string | null;
   region?: string | null;
@@ -42,6 +43,7 @@ router.post("/migrate", async (req, res) => {
         guildId: p.guildId,
         userId: p.userId,
         username: p.username,
+        uuid: p.uuid || null,
         currentTier: p.currentTier || null,
         peakTier: p.peakTier || null,
         region: p.region || null,
@@ -58,11 +60,17 @@ router.post("/migrate", async (req, res) => {
         updatedAt: now,
       };
 
+      // A snapshot may contain only the modes known to the bot. Do not erase
+      // existing website tiers when an omitted mode arrives as null.
+      const update: Partial<typeof record> = { ...record };
+      for (const key of Object.keys(update) as Array<keyof typeof record>) {
+        if (key !== "updatedAt" && update[key] == null) delete update[key];
+      }
       await db.insert(playersTable)
         .values(record)
         .onConflictDoUpdate({
           target: [playersTable.guildId, playersTable.userId],
-          set: record,
+          set: update,
         });
 
       inserted++;
