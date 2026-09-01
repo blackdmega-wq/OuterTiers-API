@@ -7,7 +7,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
  * This is intentionally tiny — no DB writes, no auth, no PII. The id is just
  * an opaque string the client generated locally.
  */
-const ONLINE_WINDOW_MS = 45_000; // 45s grace
+const ONLINE_WINDOW_MS = 150_000; // 2.5min grace for 60s visible heartbeats
 const MAX_ENTRIES = 50_000;
 const lastSeen = new Map<string, number>();
 
