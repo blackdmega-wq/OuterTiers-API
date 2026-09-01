@@ -10,12 +10,28 @@ function rawTierToLevel(tier: string | null | undefined): string {
   return num ? `T${num}` : "-";
 }
 
-const TIER_POINTS: Record<string, number> = { T1: 100, T2: 50, T3: 25, T4: 10, T5: 5 };
+const TIER_POINTS: Record<string, number> = {
+  HT1: 60, LT1: 45,
+  HT2: 30, LT2: 20,
+  HT3: 10, LT3: 6,
+  HT4: 4, LT4: 3,
+  HT5: 2, LT5: 1,
+};
+
+function rawTierToPointsKey(tier: string | null | undefined): string {
+  if (!tier) return "-";
+  // Retired tiers are stored with an R prefix (for example RHT5).
+  const normalized = tier.toUpperCase().replace(/^R/, "");
+  const num = normalized.replace(/[^0-9]/g, "");
+  if (!num) return "-";
+  const prefix = normalized.includes("HT") ? "HT" : normalized.includes("LT") ? "LT" : "";
+  return prefix ? prefix + num : "T" + num;
+}
 
 function calculatePoints(p: DbPlayer): number {
   return [p.ogvanillaTier, p.vanillaTier, p.uhcTier, p.potTier, p.nethopTier,
           p.smpTier, p.swordTier, p.axeTier, p.maceTier, p.speedTier]
-    .reduce((sum, t) => sum + (TIER_POINTS[rawTierToLevel(t)] ?? 0), 0);
+    .reduce((sum, t) => sum + (TIER_POINTS[rawTierToPointsKey(t)] ?? 0), 0);
 }
 
 function dbPlayerToWeb(p: DbPlayer) {
