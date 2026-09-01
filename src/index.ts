@@ -46,6 +46,34 @@ async function ensureSchema() {
       created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::BIGINT
     )
   `);
+  // CREATE TABLE IF NOT EXISTS does not add columns to databases created by
+  // the legacy website server. Keep the live API schema additive and idempotent.
+  await pool.query(`
+    ALTER TABLE tier_results
+      ADD COLUMN IF NOT EXISTS mode TEXT,
+      ADD COLUMN IF NOT EXISTS region TEXT,
+      ADD COLUMN IF NOT EXISTS ticket_type TEXT,
+      ADD COLUMN IF NOT EXISTS is_high_tier BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::BIGINT
+  `);
+  await pool.query(`
+    ALTER TABLE players
+      ADD COLUMN IF NOT EXISTS discord_username TEXT,
+      ADD COLUMN IF NOT EXISTS uuid TEXT,
+      ADD COLUMN IF NOT EXISTS region TEXT,
+      ADD COLUMN IF NOT EXISTS current_tier TEXT,
+      ADD COLUMN IF NOT EXISTS peak_tier TEXT,
+      ADD COLUMN IF NOT EXISTS ogvanilla_tier TEXT,
+      ADD COLUMN IF NOT EXISTS vanilla_tier TEXT,
+      ADD COLUMN IF NOT EXISTS uhc_tier TEXT,
+      ADD COLUMN IF NOT EXISTS pot_tier TEXT,
+      ADD COLUMN IF NOT EXISTS nethop_tier TEXT,
+      ADD COLUMN IF NOT EXISTS smp_tier TEXT,
+      ADD COLUMN IF NOT EXISTS sword_tier TEXT,
+      ADD COLUMN IF NOT EXISTS axe_tier TEXT,
+      ADD COLUMN IF NOT EXISTS mace_tier TEXT,
+      ADD COLUMN IF NOT EXISTS speed_tier TEXT
+  `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS punishments (
       id SERIAL PRIMARY KEY,
