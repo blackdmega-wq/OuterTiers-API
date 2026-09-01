@@ -7,7 +7,7 @@ const router = Router();
 // keep showing up in the "High Tier" feed instead of disappearing from it.
 const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1", "RLT2", "RHT2", "RLT1", "RHT1"]);
 
-type ModeKey = "sword"|"speed"|"pot"|"nethop"|"ogvanilla"|"vanilla"|"uhc"|"axe"|"mace"|"smp";
+type ModeKey = "sword"|"speed"|"pot"|"nethop"|"ogvanilla"|"vanilla"|"uhc"|"axe"|"mace"|"smp"|"spearmace"|"minecart"|"diamondsmp";
 
 function normalizeMode(mode: string | undefined): string | undefined {
   const key = String(mode || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -16,6 +16,9 @@ function normalizeMode(mode: string | undefined): string | undefined {
     sword: "sword", speed: "speed", pot: "pot", nethop: "nethop", nethpot: "nethop", nethod: "nethop",
     ogvanilla: "ogvanilla", ogvanilla1v1: "ogvanilla", vanilla: "vanilla", crystal: "vanilla",
     uhc: "uhc", axe: "axe", mace: "mace", smp: "smp",
+    spearmace: "spearmace",
+    minecart: "minecart",
+    diamondsmp: "diamondsmp",
   };
   return aliases[key];
 }
@@ -34,6 +37,9 @@ function buildModeUpdate(mode: string | undefined, tier: string) {
     case "axe":       updates.axeTier      = tier; break;
     case "mace":      updates.maceTier     = tier; break;
     case "smp":       updates.smpTier      = tier; break;
+    case "spearmace":  updates.spearMaceTier = tier; break;
+    case "minecart":   updates.minecartTier = tier; break;
+    case "diamondsmp": updates.diamondSmpTier = tier; break;
   }
   return updates;
 }
@@ -53,6 +59,9 @@ function buildModeWipe(mode: string | undefined): Partial<typeof playersTable.$i
     case "axe":       updates.axeTier      = null; break;
     case "mace":      updates.maceTier     = null; break;
     case "smp":       updates.smpTier      = null; break;
+    case "spearmace":  updates.spearMaceTier = null; break;
+    case "minecart":   updates.minecartTier = null; break;
+    case "diamondsmp": updates.diamondSmpTier = null; break;
   }
   return updates;
 }
@@ -594,6 +603,9 @@ router.post("/webhook/account-transfer", async (req, res) => {
       axeTier:         old.axeTier,
       maceTier:        old.maceTier,
       speedTier:       old.speedTier,
+      spearMaceTier:   old.spearMaceTier,
+      minecartTier:    old.minecartTier,
+      diamondSmpTier:  old.diamondSmpTier,
       updatedAt:       now,
     };
 
