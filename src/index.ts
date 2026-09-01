@@ -26,6 +26,9 @@ async function ensureSchema() {
       axe_tier TEXT,
       mace_tier TEXT,
       speed_tier TEXT,
+      spear_mace_tier TEXT,
+      minecart_tier TEXT,
+      diamond_smp_tier TEXT,
       updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::BIGINT,
       CONSTRAINT players_guild_user UNIQUE (guild_id, user_id)
     )
@@ -72,7 +75,10 @@ async function ensureSchema() {
       ADD COLUMN IF NOT EXISTS sword_tier TEXT,
       ADD COLUMN IF NOT EXISTS axe_tier TEXT,
       ADD COLUMN IF NOT EXISTS mace_tier TEXT,
-      ADD COLUMN IF NOT EXISTS speed_tier TEXT
+      ADD COLUMN IF NOT EXISTS speed_tier TEXT,
+      ADD COLUMN IF NOT EXISTS spear_mace_tier TEXT,
+      ADD COLUMN IF NOT EXISTS minecart_tier TEXT,
+      ADD COLUMN IF NOT EXISTS diamond_smp_tier TEXT
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS punishments (
