@@ -30,7 +30,8 @@ function rawTierToPointsKey(tier: string | null | undefined): string {
 
 function calculatePoints(p: DbPlayer): number {
   return [p.ogvanillaTier, p.vanillaTier, p.uhcTier, p.potTier, p.nethopTier,
-          p.smpTier, p.swordTier, p.axeTier, p.maceTier, p.speedTier]
+          p.smpTier, p.swordTier, p.axeTier, p.maceTier, p.speedTier,
+           p.spearMaceTier, p.minecartTier, p.diamondSmpTier]
     .reduce((sum, t) => sum + (TIER_POINTS[rawTierToPointsKey(t)] ?? 0), 0);
 }
 
@@ -54,6 +55,9 @@ function dbPlayerToWeb(p: DbPlayer) {
       axe:       rawTierToLevel(p.axeTier),
       mace:      rawTierToLevel(p.maceTier),
       speed:     rawTierToLevel(p.speedTier),
+      spearmace:  rawTierToLevel(p.spearMaceTier),
+      minecart:   rawTierToLevel(p.minecartTier),
+      diamondsmp: rawTierToLevel(p.diamondSmpTier),
     },
     rawTiers: {
       current:   p.currentTier, peak: p.peakTier,
@@ -62,6 +66,8 @@ function dbPlayerToWeb(p: DbPlayer) {
       nethop:    p.nethopTier,    smp:     p.smpTier,
       sword:     p.swordTier,     axe:     p.axeTier,
       mace:      p.maceTier,      speed:   p.speedTier,
+      spearmace: p.spearMaceTier, minecart: p.minecartTier,
+      diamondsmp: p.diamondSmpTier,
     },
   };
 }
@@ -69,7 +75,8 @@ function dbPlayerToWeb(p: DbPlayer) {
 /** Count non-null tier columns — used to prefer the "richer" row when deduplicating. */
 function tierScore(p: DbPlayer): number {
   return [p.ogvanillaTier, p.vanillaTier, p.uhcTier, p.potTier, p.nethopTier,
-          p.smpTier, p.swordTier, p.axeTier, p.maceTier, p.speedTier, p.currentTier]
+          p.smpTier, p.swordTier, p.axeTier, p.maceTier, p.speedTier,
+           p.spearMaceTier, p.minecartTier, p.diamondSmpTier, p.currentTier]
     .filter(Boolean).length;
 }
 
@@ -176,6 +183,7 @@ router.get("/players/:username", async (req, res) => {
       ogvanilla: row.ogvanillaTier, vanilla: row.vanillaTier, uhc: row.uhcTier,
       pot: row.potTier, nethop: row.nethopTier, smp: row.smpTier,
       sword: row.swordTier, axe: row.axeTier, mace: row.maceTier, speed: row.speedTier,
+      spearmace: row.spearMaceTier, minecart: row.minecartTier, diamondsmp: row.diamondSmpTier,
     };
 
     const modeHistory: Record<string, Array<{ tier: string; createdAt: number }>> = {};
