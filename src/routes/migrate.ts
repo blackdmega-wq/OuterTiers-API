@@ -21,6 +21,9 @@ interface MigratePlayer {
   axeTier?: string | null;
   maceTier?: string | null;
   smpTier?: string | null;
+  spearMaceTier?: string | null;
+  minecartTier?: string | null;
+  diamondSmpTier?: string | null;
 }
 
 router.post("/migrate", async (req, res) => {
@@ -57,6 +60,9 @@ router.post("/migrate", async (req, res) => {
         axeTier: p.axeTier || null,
         maceTier: p.maceTier || null,
         smpTier: p.smpTier || null,
+        spearMaceTier: p.spearMaceTier || null,
+        minecartTier: p.minecartTier || null,
+        diamondSmpTier: p.diamondSmpTier || null,
         updatedAt: now,
       };
 
