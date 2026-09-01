@@ -300,7 +300,7 @@ router.post("/webhook/bulk-results", async (req, res) => {
         testerId: testerId ?? null,
         testerName: testerName ?? null,
         tier: upperTier,
-        mode: mode ?? null,
+        mode: normalizedMode ?? null,
         region: region ?? null,
         ticketType: ticketType ?? null,
         isHighTier,
@@ -500,14 +500,15 @@ router.post("/webhook/fix-result-modes", async (req, res) => {
   const WINDOW = 15_000; // ±15 s match window
 
   for (const u of updates) {
-    const { guildId, userId, createdAt, mode } = u;
-    if (!guildId || !userId || !createdAt || !mode) { skipped++; continue; }
+    const { guildId, userId, createdAt, mode, tier } = u;
+    const normalizedMode = normalizeMode(mode);
+    if (!guildId || !userId || !createdAt || !normalizedMode) { skipped++; continue; }
     // Normalise timestamp: bot may send seconds or ms — anything <1e12 is seconds
     const ts = Number(createdAt) < 1e12 ? Number(createdAt) * 1000 : Number(createdAt);
     try {
       const result = await db
         .update(tierResultsTable)
-        .set({ mode: String(mode).toLowerCase() })
+        .set({ mode: normalizedMode })
         .where(
           and(
             eq(tierResultsTable.guildId, guildId),
@@ -517,7 +518,28 @@ router.post("/webhook/fix-result-modes", async (req, res) => {
           )
         );
       const count = (result as any).rowCount ?? 0;
-      if (count > 0) patched += count; else skipped++;
+      if (count > 0) {
+        patched += count;
+        // Keep the player's mode column in sync as well as the history row.
+        const latest = await db
+          .select({ tier: tierResultsTable.tier })
+          .from(tierResultsTable)
+          .where(and(
+            eq(tierResultsTable.guildId, guildId),
+            eq(tierResultsTable.userId, userId),
+            eq(tierResultsTable.mode, normalizedMode),
+          ))
+          .orderBy(desc(tierResultsTable.createdAt), desc(tierResultsTable.id))
+          .limit(1);
+        const modeTier = latest[0]?.tier ?? (tier ? String(tier).toUpperCase() : undefined);
+        const modeUpdate = buildModeUpdate(normalizedMode, modeTier || '');
+        if (Object.keys(modeUpdate).length > 0 && modeTier) {
+          await db.update(playersTable).set({ ...modeUpdate, updatedAt: Date.now() }).where(and(
+            eq(playersTable.guildId, guildId),
+            eq(playersTable.userId, userId),
+          ));
+        }
+      } else skipped++;
     } catch (err) {
       console.error("[/api/webhook/fix-result-modes] error:", (err as Error).message);
       skipped++;
