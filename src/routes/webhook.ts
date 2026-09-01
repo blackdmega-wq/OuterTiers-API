@@ -9,6 +9,17 @@ const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1", "RLT2", "RHT2", "
 
 type ModeKey = "sword"|"speed"|"pot"|"nethop"|"ogvanilla"|"vanilla"|"uhc"|"axe"|"mace"|"smp";
 
+function normalizeMode(mode: string | undefined): string | undefined {
+  const key = String(mode || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!key) return undefined;
+  const aliases: Record<string, string> = {
+    sword: "sword", speed: "speed", pot: "pot", nethop: "nethop", nethpot: "nethop", nethod: "nethop",
+    ogvanilla: "ogvanilla", ogvanilla1v1: "ogvanilla", vanilla: "vanilla", crystal: "vanilla",
+    uhc: "uhc", axe: "axe", mace: "mace", smp: "smp",
+  };
+  return aliases[key];
+}
+
 function buildModeUpdate(mode: string | undefined, tier: string) {
   if (!mode) return {};
   const updates: Partial<typeof playersTable.$inferInsert> = {};
@@ -59,6 +70,7 @@ router.post("/webhook/tier", async (req, res) => {
   const { secret, type, guildId, userId, username, discordUsername, uuid,
           tier, peakTier, mode, region, testerId, testerName, ticketType, scope }
     = req.body as Record<string, string | undefined>;
+  const normalizedMode = normalizeMode(mode);
 
   if (!secret || secret !== process.env.WEBSITE_API_SECRET)
     return res.status(401).json({ error: "Unauthorized" });
@@ -172,7 +184,7 @@ router.post("/webhook/tier", async (req, res) => {
     const upperTier = tier.toUpperCase();
     const isHighTier = HIGH_TIERS.has(upperTier);
     const displayName = username || discordUsername || userId;
-    const modeUpdate = buildModeUpdate(mode, upperTier);
+    const modeUpdate = buildModeUpdate(normalizedMode, upperTier);
 
     const playerBase: typeof playersTable.$inferInsert = {
       guildId, userId, username: displayName, discordUsername, region,
@@ -244,24 +256,8 @@ router.post("/webhook/bulk-results", async (req, res) => {
 
     try {
       // Dedup: check for an existing row within ±10 s with same userId + mode
-      const existing = await db
-        .select({ id: tierResultsTable.id })
-        .from(tierResultsTable)
-        .where(
-          and(
-            eq(tierResultsTable.guildId, guildId),
-            eq(tierResultsTable.userId, userId),
-            eq(tierResultsTable.tier, upperTier),
-            mode
-              ? and(eq(tierResultsTable.mode, mode), between(tierResultsTable.createdAt, ts - WINDOW, ts + WINDOW))
-              : between(tierResultsTable.createdAt, ts - WINDOW, ts + WINDOW),
-          )
-        )
-        .limit(1);
-
-      if (existing.length > 0) { skipped++; continue; }
-
-      // Resolve username from players table if not provided
+      // Resolve the IGN before deduplication so a later reconciliation can
+      // repair rows that were originally stored with the Discord user ID.
       let resolvedUsername = username;
       if (!resolvedUsername) {
         const playerRows = await db
@@ -270,6 +266,32 @@ router.post("/webhook/bulk-results", async (req, res) => {
           .where(and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId)))
           .limit(1);
         resolvedUsername = playerRows[0]?.username ?? userId;
+      }
+
+      const normalizedMode = normalizeMode(mode);
+      const existing = await db
+        .select({ id: tierResultsTable.id, username: tierResultsTable.username })
+        .from(tierResultsTable)
+        .where(
+          and(
+            eq(tierResultsTable.guildId, guildId),
+            eq(tierResultsTable.userId, userId),
+            eq(tierResultsTable.tier, upperTier),
+            normalizedMode
+              ? and(eq(tierResultsTable.mode, normalizedMode), between(tierResultsTable.createdAt, ts - WINDOW, ts + WINDOW))
+              : between(tierResultsTable.createdAt, ts - WINDOW, ts + WINDOW),
+          )
+        )
+        .limit(1);
+
+      if (existing.length > 0) {
+        if (resolvedUsername && resolvedUsername !== userId && existing[0].username === userId) {
+          await db.update(tierResultsTable)
+            .set({ username: resolvedUsername })
+            .where(eq(tierResultsTable.id, existing[0].id));
+        }
+        skipped++;
+        continue;
       }
 
       await db.insert(tierResultsTable).values({
@@ -287,7 +309,7 @@ router.post("/webhook/bulk-results", async (req, res) => {
 
       // Upsert player so /api/players/:username returns data even after a pure backfill.
       // We set the mode-specific tier column only if the result has a mode.
-      const modeUpdate = buildModeUpdate(mode, upperTier);
+      const modeUpdate = buildModeUpdate(normalizedMode, upperTier);
       const playerWhere = and(
         eq(playersTable.guildId, guildId),
         eq(playersTable.userId, userId),
