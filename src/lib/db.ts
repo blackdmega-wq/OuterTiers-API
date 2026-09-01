@@ -35,6 +35,9 @@ export const playersTable = pgTable(
     axeTier: text("axe_tier"),
     maceTier: text("mace_tier"),
     speedTier: text("speed_tier"),
+    spearMaceTier: text("spear_mace_tier"),
+    minecartTier: text("minecart_tier"),
+    diamondSmpTier: text("diamond_smp_tier"),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull().$defaultFn(() => Date.now()),
   },
   (t) => [unique("players_guild_user").on(t.guildId, t.userId)]
