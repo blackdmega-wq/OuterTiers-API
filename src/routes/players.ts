@@ -223,7 +223,15 @@ router.get("/players/:username/history", async (req, res) => {
   try {
     // First try to find the player in the players table (for userId-based lookup)
     const playerRows = await db.select().from(playersTable);
-    const player = playerRows.find(p => p.username.toLowerCase() === username.toLowerCase());
+    const matchingPlayers = playerRows.filter(p => p.username.toLowerCase() === username.toLowerCase());
+    // A username can temporarily exist under multiple Discord IDs. Use the same
+    // richest-row rule as /api/players so history cannot attach to a stale ghost row.
+    const player = matchingPlayers.length > 1
+      ? matchingPlayers.reduce((best, cur) =>
+          tierScore(cur) > tierScore(best) ||
+          (tierScore(cur) === tierScore(best) && cur.updatedAt > best.updatedAt)
+            ? cur : best)
+      : matchingPlayers[0];
 
     // Query tier_results and punishments by userId if player exists, otherwise by username directly.
     // This ensures results are returned even if the player isn't in the players table yet
