@@ -56,7 +56,7 @@ function requireSecret(req: any, res: any): boolean {
 // ── Single tier result (posted in real-time when a test is completed) ─────────
 
 router.post("/webhook/tier", async (req, res) => {
-  const { secret, type, guildId, userId, username, discordUsername,
+  const { secret, type, guildId, userId, username, discordUsername, uuid,
           tier, peakTier, mode, region, testerId, testerName, ticketType, scope }
     = req.body as Record<string, string | undefined>;
 
