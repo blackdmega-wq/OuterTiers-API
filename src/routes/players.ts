@@ -110,7 +110,7 @@ router.get("/players", async (_req, res) => {
     // player list never shows the same name twice.
     const deduped = deduplicateByUsername(rows);
     const players = deduped.map(dbPlayerToWeb).sort((a, b) => b.points - a.points);
-    res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300, stale-while-revalidate=60");
+    res.setHeader("Cache-Control", "no-store");
     return res.json({ players });
   } catch (err) {
     console.error("[/api/players] DB error:", (err as Error).message);
