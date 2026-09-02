@@ -181,7 +181,7 @@ router.post("/webhook/tier", async (req, res) => {
     if (type === "unretire") {
       if (!mode || !tier) return res.status(400).json({ error: "Missing mode or tier for unretire" });
       const activeTier = tier.toUpperCase();
-      const modeUpdate = buildModeUpdate(mode, activeTier);
+      const modeUpdate = buildModeUpdate(normalizedMode, activeTier);
       const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
       if (existing.length > 0) {
         await db.update(playersTable).set({ currentTier: activeTier, updatedAt: now, ...modeUpdate }).where(where);
@@ -228,7 +228,7 @@ router.post("/webhook/tier", async (req, res) => {
 
     await db.insert(tierResultsTable).values({
       guildId, userId, username: displayName, testerId, testerName,
-      tier: upperTier, mode: mode ?? null, region, ticketType, isHighTier, createdAt: now,
+      tier: upperTier, mode: normalizedMode ?? null, region, ticketType, isHighTier, createdAt: now,
     });
 
     return res.json({ ok: true });
