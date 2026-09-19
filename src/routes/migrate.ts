@@ -2,6 +2,13 @@ import { Router } from "express";
 import { db, playersTable } from "../lib/db.js";
 
 const router = Router();
+const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
+const MC_UUID_RE = /^[0-9a-f]{32}$/i;
+
+function normalizeUuid(value: unknown): string | null {
+  const compact = String(value ?? "").replace(/-/g, "").trim().toLowerCase();
+  return MC_UUID_RE.test(compact) ? compact : null;
+}
 
 interface MigratePlayer {
   guildId: string;
@@ -38,15 +45,24 @@ router.post("/migrate", async (req, res) => {
   try {
     const now = Date.now();
     let inserted = 0;
+    let skipped = 0;
 
     for (const p of players) {
-      if (!p.guildId || !p.userId || !p.username) continue;
+      const username = String(p.username ?? "").trim();
+      const uuid = normalizeUuid(p.uuid);
+      // This endpoint is a public-data boundary. A Discord nickname, a
+      // ticket note, or a generated internal UUID must never enter the
+      // website database as a Minecraft identity.
+      if (!p.guildId || !p.userId || !MC_NAME_RE.test(username) || !uuid) {
+        skipped++;
+        continue;
+      }
 
       const record = {
         guildId: p.guildId,
         userId: p.userId,
-        username: p.username,
-        uuid: p.uuid || null,
+        username,
+        uuid,
         currentTier: p.currentTier || null,
         peakTier: p.peakTier || null,
         region: p.region || null,
@@ -82,8 +98,8 @@ router.post("/migrate", async (req, res) => {
       inserted++;
     }
 
-    console.log(`[/api/migrate] Migrated ${inserted} players`);
-    return res.json({ ok: true, inserted });
+    console.log(`[/api/migrate] Migrated ${inserted} players, skipped ${skipped} unverified identities`);
+    return res.json({ ok: true, inserted, skipped });
   } catch (err) {
     console.error("[/api/migrate] DB error:", (err as Error).message);
     return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });

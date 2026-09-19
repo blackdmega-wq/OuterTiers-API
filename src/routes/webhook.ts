@@ -3,6 +3,7 @@ import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.
 import { and, eq, between, desc, isNull } from "drizzle-orm";
 
 const router = Router();
+const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
 // Includes retired variants (R-prefixed, set by /retire) so retired players
 // keep showing up in the "High Tier" feed instead of disappearing from it.
 const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1", "RLT2", "RHT2", "RLT1", "RHT1"]);
@@ -152,7 +153,8 @@ router.post("/webhook/tier", async (req, res) => {
       if (existing.length > 0) {
         await db.update(playersTable).set({ peakTier: upperTier, updatedAt: now }).where(where);
       } else {
-        const displayName = username || discordUsername || userId;
+        const displayName = username && MC_NAME_RE.test(username.trim()) ? username.trim() : null;
+        if (!displayName) return res.status(422).json({ error: "A verified Minecraft username is required" });
         await db.insert(playersTable).values({ guildId, userId, username: displayName, discordUsername, region, peakTier: upperTier, updatedAt: now });
       }
       return res.json({ ok: true });
@@ -160,18 +162,21 @@ router.post("/webhook/tier", async (req, res) => {
 
     // ── Update username only (called by IGN auto-sync when a rename is detected) ──
     if (type === "update-username") {
-      if (!username) return res.status(400).json({ error: "Missing username" });
+      if (!username || !MC_NAME_RE.test(username.trim())) {
+        return res.status(422).json({ error: "A valid Minecraft username is required" });
+      }
+      const verifiedUsername = username.trim();
       const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
       if (existing.length > 0) {
-        const playerUpdate: Partial<typeof playersTable.$inferInsert> = { username, updatedAt: now };
+        const playerUpdate: Partial<typeof playersTable.$inferInsert> = { username: verifiedUsername, updatedAt: now };
         if (uuid) playerUpdate.uuid = uuid;
         await db.update(playersTable).set(playerUpdate).where(where);
       }
       // History is keyed by Discord userId; update denormalized names after MC renames.
-      await db.update(tierResultsTable).set({ username }).where(
+      await db.update(tierResultsTable).set({ username: verifiedUsername }).where(
         and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, userId)),
       );
-      await db.update(punishmentsTable).set({ username }).where(
+      await db.update(punishmentsTable).set({ username: verifiedUsername }).where(
         and(eq(punishmentsTable.guildId, guildId), eq(punishmentsTable.userId, userId)),
       );
       return res.json({ ok: true });
@@ -192,8 +197,15 @@ router.post("/webhook/tier", async (req, res) => {
     if (!tier) return res.status(400).json({ error: "Missing tier" });
     const upperTier = tier.toUpperCase();
     const isHighTier = HIGH_TIERS.has(upperTier);
-    const displayName = username || discordUsername || userId;
     const modeUpdate = buildModeUpdate(normalizedMode, upperTier);
+    const existingRows = await db.select().from(playersTable).where(where).limit(1);
+    const incomingUsername = username && MC_NAME_RE.test(username.trim()) ? username.trim() : null;
+    const storedUsername = existingRows[0]?.username;
+    const displayName = incomingUsername ||
+      (storedUsername && MC_NAME_RE.test(storedUsername.trim()) ? storedUsername.trim() : null);
+    if (!displayName) {
+      return res.status(422).json({ error: "A verified Minecraft username is required" });
+    }
 
     const playerBase: typeof playersTable.$inferInsert = {
       guildId, userId, username: displayName, discordUsername, region,
@@ -201,7 +213,6 @@ router.post("/webhook/tier", async (req, res) => {
     };
     if (peakTier) playerBase.peakTier = peakTier.toUpperCase();
 
-    const existingRows = await db.select().from(playersTable).where(where).limit(1);
     if (existingRows.length > 0) {
       const existingRow = existingRows[0];
       const updateData: Partial<typeof playersTable.$inferInsert> = { ...playerBase };
@@ -210,12 +221,11 @@ router.post("/webhook/tier", async (req, res) => {
       // A "real" Minecraft IGN matches the Mojang name rules: 3-16 alphanumeric/underscore chars.
       // If the stored username fails this check (e.g. a Discord display name like
       // "Player | Dont @ for test" was accidentally saved), always allow a valid IGN to fix it.
-      const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
       const hasRealExistingUsername =
         existingRow.username &&
         existingRow.username !== userId &&
         MC_NAME_RE.test(existingRow.username);
-      const newNameIsRealIGN = username && MC_NAME_RE.test(username);
+       const newNameIsRealIGN = Boolean(incomingUsername);
       if (hasRealExistingUsername && !newNameIsRealIGN) {
         // Keep the stored username — the incoming value is a fallback, not a real IGN.
         delete updateData.username;
@@ -267,15 +277,19 @@ router.post("/webhook/bulk-results", async (req, res) => {
       // Dedup: check for an existing row within ±10 s with same userId + mode
       // Resolve the IGN before deduplication so a later reconciliation can
       // repair rows that were originally stored with the Discord user ID.
-      let resolvedUsername = username;
+      let resolvedUsername = typeof username === "string" && MC_NAME_RE.test(username.trim())
+        ? username.trim()
+        : null;
       if (!resolvedUsername) {
         const playerRows = await db
           .select({ username: playersTable.username })
           .from(playersTable)
           .where(and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId)))
           .limit(1);
-        resolvedUsername = playerRows[0]?.username ?? userId;
+        const stored = playerRows[0]?.username;
+        resolvedUsername = stored && MC_NAME_RE.test(stored.trim()) ? stored.trim() : null;
       }
+      if (!resolvedUsername) { skipped++; continue; }
 
       const normalizedMode = normalizeMode(mode);
       const existing = await db

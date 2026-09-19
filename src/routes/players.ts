@@ -3,6 +3,11 @@ import { db, playersTable, tierResultsTable, punishmentsTable, type DbPlayer } f
 import { eq, desc, sql } from "drizzle-orm";
 
 const router = Router();
+const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
+
+function hasPublishableMinecraftName(player: DbPlayer): boolean {
+  return MC_NAME_RE.test(String(player.username ?? "").trim());
+}
 
 function rawTierToLevel(tier: string | null | undefined): string {
   if (!tier) return "-";
@@ -104,7 +109,7 @@ function deduplicateByUsername(rows: DbPlayer[]): DbPlayer[] {
 
 router.get("/players", async (_req, res) => {
   try {
-    const rows = await db.select().from(playersTable);
+    const rows = (await db.select().from(playersTable)).filter(hasPublishableMinecraftName);
     // Deduplicate: if the same IGN appears under two different Discord IDs (ghost
     // rows from old accounts or backfills), expose only the richest row so the
     // player list never shows the same name twice.
@@ -124,7 +129,7 @@ router.get("/players/by-discord/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
     const rows = await db.select().from(playersTable);
-    const matches = rows.filter(p => p.userId === userId);
+    const matches = rows.filter(p => p.userId === userId && hasPublishableMinecraftName(p));
     if (matches.length === 0) return res.status(404).json({ error: "Player not found" });
     // When a user appears under multiple guild IDs, pick the row with the most tier data,
     // falling back to the most recently updated row.
@@ -142,7 +147,7 @@ router.get("/players/by-discord/:userId", async (req, res) => {
 router.get("/players/:username", async (req, res) => {
   const { username } = req.params;
   try {
-    const rows = await db.select().from(playersTable);
+    const rows = (await db.select().from(playersTable)).filter(hasPublishableMinecraftName);
     // Find all rows matching this username, then pick the richest one (most tier data).
     // This prevents a stale ghost row (old Discord ID, no tiers) from shadowing the
     // real row when Array.find() would otherwise return whichever came first in the DB.
@@ -244,9 +249,12 @@ router.get("/players/:username", async (req, res) => {
 
 router.get("/players/:username/history", async (req, res) => {
   const { username } = req.params;
+  if (!MC_NAME_RE.test(username)) {
+    return res.status(404).json({ error: "Player not found" });
+  }
   try {
     // First try to find the player in the players table (for userId-based lookup)
-    const playerRows = await db.select().from(playersTable);
+    const playerRows = (await db.select().from(playersTable)).filter(hasPublishableMinecraftName);
     const matchingPlayers = playerRows.filter(p => p.username.toLowerCase() === username.toLowerCase());
     // A username can temporarily exist under multiple Discord IDs. Use the same
     // richest-row rule as /api/players so history cannot attach to a stale ghost row.

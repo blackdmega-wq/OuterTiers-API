@@ -4,6 +4,7 @@ import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.
 import { and, eq, desc, sql, ilike, or, inArray } from "drizzle-orm";
 
 const router = Router();
+const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
 
 function requireSecret(req: any, res: any): boolean {
   const secret = (req.headers["x-admin-secret"] as string) || req.body?.secret;
@@ -29,14 +30,21 @@ router.post("/admin/sync", async (req, res) => {
 router.post("/admin/fix-username", async (req, res) => {
   if (!requireSecret(req, res)) return;
   const { guildId, userId, newUsername } = req.body as Record<string, string | undefined>;
-  if (!guildId || !userId || !newUsername) {
+  if (!guildId || !userId || !newUsername || !MC_NAME_RE.test(newUsername.trim())) {
     return res.status(400).json({ error: "Missing guildId, userId, or newUsername" });
   }
+  const verifiedUsername = newUsername.trim();
   const where = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId));
   const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
   if (!existing.length) return res.status(404).json({ error: "Player not found" });
-  await db.update(playersTable).set({ username: newUsername, updatedAt: Date.now() }).where(where);
-  return res.json({ ok: true, newUsername });
+  await db.update(playersTable).set({ username: verifiedUsername, updatedAt: Date.now() }).where(where);
+  await db.update(tierResultsTable).set({ username: verifiedUsername }).where(
+    and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, userId)),
+  );
+  await db.update(punishmentsTable).set({ username: verifiedUsername }).where(
+    and(eq(punishmentsTable.guildId, guildId), eq(punishmentsTable.userId, userId)),
+  );
+  return res.json({ ok: true, newUsername: verifiedUsername });
 });
 
 /**
@@ -47,9 +55,10 @@ router.post("/admin/fix-username", async (req, res) => {
 router.post("/admin/fix-username-by-display", async (req, res) => {
   if (!requireSecret(req, res)) return;
   const { oldUsername, newUsername } = req.body as Record<string, string | undefined>;
-  if (!oldUsername || !newUsername) {
+  if (!oldUsername || !newUsername || !MC_NAME_RE.test(newUsername.trim())) {
     return res.status(400).json({ error: "Missing oldUsername or newUsername" });
   }
+  const verifiedUsername = newUsername.trim();
   const rows = await db
     .select({ id: playersTable.id, userId: playersTable.userId })
     .from(playersTable)
@@ -57,9 +66,13 @@ router.post("/admin/fix-username-by-display", async (req, res) => {
     .limit(10);
   if (!rows.length) return res.status(404).json({ error: "No player found with that username" });
   await db.update(playersTable)
-    .set({ username: newUsername, updatedAt: Date.now() })
+    .set({ username: verifiedUsername, updatedAt: Date.now() })
     .where(ilike(playersTable.username, oldUsername));
-  return res.json({ ok: true, fixed: rows.length, newUsername });
+  for (const row of rows) {
+    await db.update(tierResultsTable).set({ username: verifiedUsername }).where(eq(tierResultsTable.userId, row.userId));
+    await db.update(punishmentsTable).set({ username: verifiedUsername }).where(eq(punishmentsTable.userId, row.userId));
+  }
+  return res.json({ ok: true, fixed: rows.length, newUsername: verifiedUsername });
 });
 
 // ── Admin history GUI: list all test results (paginated, optional search) ────

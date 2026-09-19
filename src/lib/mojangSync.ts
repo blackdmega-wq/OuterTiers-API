@@ -4,6 +4,13 @@ import { logger } from "./logger.js";
 
 const MOJANG_BY_NAME = "https://api.mojang.com/users/profiles/minecraft/";
 const MOJANG_BY_UUID = "https://sessionserver.mojang.com/session/minecraft/profile/";
+const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
+const MC_UUID_RE = /^[0-9a-f]{32}$/i;
+
+function normalizeUuid(value: string | null | undefined): string | null {
+  const compact = String(value ?? "").replace(/-/g, "").trim().toLowerCase();
+  return MC_UUID_RE.test(compact) ? compact : null;
+}
 
 /** Fetch UUID for a Minecraft username. Returns null if the account doesn't exist (cracked/renamed). */
 export async function lookupUUID(username: string): Promise<string | null> {
@@ -56,9 +63,10 @@ export async function syncAllPlayers(): Promise<{ synced: number; renamed: numbe
   for (const player of players) {
     await sleep(200);
 
-    if (!player.uuid) {
+    const storedUuid = normalizeUuid(player.uuid);
+    if (!storedUuid) {
       // No UUID stored yet — look it up by current username
-      const uuid = await lookupUUID(player.username);
+      const uuid = MC_NAME_RE.test(player.username) ? await lookupUUID(player.username) : null;
       if (uuid) {
         await db.update(playersTable)
           .set({ uuid, updatedAt: Date.now() })
@@ -72,13 +80,31 @@ export async function syncAllPlayers(): Promise<{ synced: number; renamed: numbe
       }
     } else {
       // UUID already known — check if they renamed
-      const currentName = await lookupCurrentUsername(player.uuid);
-      if (!currentName) continue;
+      const currentName = await lookupCurrentUsername(storedUuid);
+      if (!currentName) {
+        // Older bot versions stored a random UUID when a profile had no
+        // verified UUID. If the stored name is valid, resolve it by name and
+        // replace the random value with Mojang's canonical UUID.
+        if (MC_NAME_RE.test(player.username)) {
+          const resolvedUuid = await lookupUUID(player.username);
+          if (resolvedUuid && resolvedUuid !== storedUuid) {
+            await db.update(playersTable)
+              .set({ uuid: resolvedUuid, updatedAt: Date.now() })
+              .where(eq(playersTable.id, player.id));
+            synced++;
+            logger.info({ username: player.username, oldUuid: storedUuid, uuid: resolvedUuid }, "Generated UUID replaced");
+          }
+        } else {
+          cracked++;
+          logger.warn({ username: player.username, uuid: storedUuid }, "Unverified username hidden from public player data");
+        }
+        continue;
+      }
 
       if (currentName.toLowerCase() !== player.username.toLowerCase()) {
         const oldName = player.username;
         await db.update(playersTable)
-          .set({ username: currentName, updatedAt: Date.now() })
+          .set({ username: currentName, uuid: storedUuid, updatedAt: Date.now() })
           .where(eq(playersTable.id, player.id));
         renamed++;
         logger.info({ oldName, newName: currentName, uuid: player.uuid }, "Username auto-updated (rename detected)");
