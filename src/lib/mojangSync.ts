@@ -8,7 +8,7 @@ const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
 const MC_UUID_RE = /^[0-9a-f]{32}$/i;
 const MOJANG_RETRY_ATTEMPTS = Math.max(2, Math.min(5, Number(process.env.MOJANG_RETRY_ATTEMPTS || 4)));
 const MOJANG_RETRY_BASE_MS = Math.max(1000, Number(process.env.MOJANG_RETRY_BASE_MS || 2000));
-const MOJANG_REQUEST_INTERVAL_MS = Math.max(1000, Number(process.env.MOJANG_REQUEST_INTERVAL_MS || 1050));
+const MOJANG_REQUEST_INTERVAL_MS = Math.max(1000, Number(process.env.MOJANG_REQUEST_INTERVAL_MS || 1000));
 let lastMojangRequestAt = 0;
 
 function normalizeUuid(value: string | null | undefined): string | null {
