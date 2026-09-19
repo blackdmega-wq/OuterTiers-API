@@ -1,4 +1,4 @@
-import { db, playersTable } from "./db.js";
+import { db, playersTable, tierResultsTable, punishmentsTable } from "./db.js";
 import { eq, and, isNull } from "drizzle-orm";
 import { logger } from "./logger.js";
 
@@ -103,9 +103,27 @@ export async function syncAllPlayers(): Promise<{ synced: number; renamed: numbe
 
       if (currentName.toLowerCase() !== player.username.toLowerCase()) {
         const oldName = player.username;
-        await db.update(playersTable)
-          .set({ username: currentName, uuid: storedUuid, updatedAt: Date.now() })
-          .where(eq(playersTable.id, player.id));
+        await db.transaction(async (tx) => {
+          const update = { username: currentName, uuid: storedUuid, updatedAt: Date.now() };
+          await tx.update(playersTable)
+            .set(update)
+            .where(eq(playersTable.id, player.id));
+          // Keep feeds and profile history consistent with the canonical
+          // Minecraft name. The profile itself is keyed by Discord user ID,
+          // so old history rows must be updated by guild + user as well.
+          await tx.update(tierResultsTable)
+            .set({ username: currentName })
+            .where(and(
+              eq(tierResultsTable.guildId, player.guildId),
+              eq(tierResultsTable.userId, player.userId),
+            ));
+          await tx.update(punishmentsTable)
+            .set({ username: currentName })
+            .where(and(
+              eq(punishmentsTable.guildId, player.guildId),
+              eq(punishmentsTable.userId, player.userId),
+            ));
+        });
         renamed++;
         logger.info({ oldName, newName: currentName, uuid: player.uuid }, "Username auto-updated (rename detected)");
       }
