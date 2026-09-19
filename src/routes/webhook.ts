@@ -166,19 +166,66 @@ router.post("/webhook/tier", async (req, res) => {
         return res.status(422).json({ error: "A valid Minecraft username is required" });
       }
       const verifiedUsername = username.trim();
-      const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
-      if (existing.length > 0) {
-        const playerUpdate: Partial<typeof playersTable.$inferInsert> = { username: verifiedUsername, updatedAt: now };
-        if (uuid) playerUpdate.uuid = uuid;
-        await db.update(playersTable).set(playerUpdate).where(where);
+      const normalizedUuid = uuid
+        ? String(uuid).replace(/-/g, "").toLowerCase()
+        : null;
+      const existing = await db
+        .select({ id: playersTable.id, userId: playersTable.userId })
+        .from(playersTable)
+        .where(where)
+        .limit(1);
+      let playerWhere = where;
+      let historyUserIds = [userId];
+
+      // A bot retry can arrive after a Discord account transfer, or before
+      // the website has received its first tier row. Do not return 200 while
+      // silently updating nothing: use the permanent UUID when possible and
+      // create the minimal player row as a last resort.
+      if (existing.length === 0 && normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid)) {
+        const byUuid = await db
+          .select({ id: playersTable.id, userId: playersTable.userId })
+          .from(playersTable)
+          .where(and(eq(playersTable.guildId, guildId), eq(playersTable.uuid, normalizedUuid)))
+          .limit(1);
+        if (byUuid.length > 0) {
+          playerWhere = eq(playersTable.id, byUuid[0].id);
+          historyUserIds = [...new Set([userId, byUuid[0].userId])];
+        }
+      } else if (existing.length > 0) {
+        historyUserIds = [userId, existing[0].userId].filter(
+          (value, index, values) => values.indexOf(value) === index,
+        );
+      }
+
+      const playerUpdate: Partial<typeof playersTable.$inferInsert> = {
+        username: verifiedUsername,
+        updatedAt: now,
+      };
+      if (normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid)) {
+        playerUpdate.uuid = normalizedUuid;
+      }
+      if (existing.length > 0 || playerWhere !== where) {
+        await db.update(playersTable).set(playerUpdate).where(playerWhere);
+      } else {
+        await db.insert(playersTable).values({
+          guildId,
+          userId,
+          username: verifiedUsername,
+          uuid: normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid) ? normalizedUuid : null,
+          discordUsername: null,
+          region: null,
+          updatedAt: now,
+        });
       }
       // History is keyed by Discord userId; update denormalized names after MC renames.
-      await db.update(tierResultsTable).set({ username: verifiedUsername }).where(
-        and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, userId)),
-      );
-      await db.update(punishmentsTable).set({ username: verifiedUsername }).where(
-        and(eq(punishmentsTable.guildId, guildId), eq(punishmentsTable.userId, userId)),
-      );
+      for (const historyUserId of historyUserIds) {
+        await db.update(tierResultsTable).set({ username: verifiedUsername }).where(
+          and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, historyUserId)),
+        );
+        await db.update(punishmentsTable).set({ username: verifiedUsername }).where(
+          and(eq(punishmentsTable.guildId, guildId), eq(punishmentsTable.userId, historyUserId)),
+        );
+      }
       return res.json({ ok: true });
     }
 
