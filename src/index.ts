@@ -133,9 +133,6 @@ ensureSchema().then(() => {
 
     backfillHighTier().catch(err => logger.error({ err }, "Startup high-tier backfill failed"));
 
-    setInterval(() => {
-      syncAllPlayers().catch(err => logger.error({ err }, "Scheduled Mojang sync failed"));
-    }, 24 * 60 * 60 * 1_000);
   });
 }).catch(err => {
   logger.error({ err }, "Schema migration failed — exiting");
