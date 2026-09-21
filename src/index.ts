@@ -112,9 +112,24 @@ ensureSchema().then(() => {
   app.listen(port, () => {
     logger.info({ port }, "Server listening");
 
-    setTimeout(() => {
-      syncAllPlayers().catch(err => logger.error({ err }, "Startup Mojang sync failed"));
-    }, 5_000);
+    const mojangSyncIntervalMs = Math.max(15 * 60 * 1000, Number(process.env.MOJANG_SYNC_INTERVAL_MS || 30 * 60 * 1000));
+    let mojangSyncRunning = false;
+    const runMojangSync = async () => {
+      if (mojangSyncRunning) return;
+      mojangSyncRunning = true;
+      try {
+        const result = await syncAllPlayers();
+        logger.info({ result }, "Mojang player sync completed");
+      } catch (err) {
+        logger.error({ err }, "Mojang player sync failed");
+      } finally {
+        mojangSyncRunning = false;
+      }
+    };
+
+    setTimeout(runMojangSync, 5_000);
+    const mojangSyncTimer = setInterval(runMojangSync, mojangSyncIntervalMs);
+    mojangSyncTimer.unref?.();
 
     backfillHighTier().catch(err => logger.error({ err }, "Startup high-tier backfill failed"));
 
