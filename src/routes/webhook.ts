@@ -4,6 +4,7 @@ import { and, eq, between, desc, isNull } from "drizzle-orm";
 
 const router = Router();
 const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
+const DISCORD_ID_RE = /^\d{17,20}$/;
 // Includes retired variants (R-prefixed, set by /retire) so retired players
 // keep showing up in the "High Tier" feed instead of disappearing from it.
 const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1", "RLT2", "RHT2", "RLT1", "RHT1"]);
@@ -86,6 +87,8 @@ router.post("/webhook/tier", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   if (!guildId || !userId)
     return res.status(400).json({ error: "Missing required fields: guildId, userId" });
+  if (!DISCORD_ID_RE.test(String(userId)))
+    return res.status(422).json({ error: "A valid Discord userId is required" });
 
   try {
     const now = Date.now();
@@ -314,7 +317,7 @@ router.post("/webhook/bulk-results", async (req, res) => {
 
   for (const r of sorted) {
     const { guildId, userId, username, tier, mode, region, ticketType, testerId, testerName, createdAt } = r;
-    if (!guildId || !userId || !tier) { skipped++; continue; }
+    if (!guildId || !userId || !DISCORD_ID_RE.test(String(userId)) || !tier) { skipped++; continue; }
 
     const upperTier = String(tier).toUpperCase();
     const isHighTier = HIGH_TIERS.has(upperTier);
@@ -427,7 +430,7 @@ router.post("/webhook/punishment", async (req, res) => {
   const { guildId, userId, username, type, reason, durationMs, expiresAt,
           moderatorId, moderatorName, createdAt } = req.body as Record<string, any>;
 
-  if (!guildId || !userId || !type)
+  if (!guildId || !userId || !DISCORD_ID_RE.test(String(userId)) || !type)
     return res.status(400).json({ error: "Missing required fields: guildId, userId, type" });
 
   try {
@@ -572,7 +575,7 @@ router.post("/webhook/fix-result-modes", async (req, res) => {
   for (const u of updates) {
     const { guildId, userId, createdAt, mode, tier } = u;
     const normalizedMode = normalizeMode(mode);
-    if (!guildId || !userId || !createdAt || !normalizedMode) { skipped++; continue; }
+    if (!guildId || !userId || !DISCORD_ID_RE.test(String(userId)) || !createdAt || !normalizedMode) { skipped++; continue; }
     // Normalise timestamp: bot may send seconds or ms — anything <1e12 is seconds
     const ts = Number(createdAt) < 1e12 ? Number(createdAt) * 1000 : Number(createdAt);
     try {
