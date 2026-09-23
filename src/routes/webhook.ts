@@ -24,6 +24,15 @@ function normalizeMode(mode: string | undefined): string | undefined {
   return aliases[key];
 }
 
+function normalizeTier(tier: string | undefined): string | undefined {
+  const key = String(tier || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const match = key.match(/^(R?)(HIGH(?:TIER)?|HT|LOW(?:TIER)?|LT)([1-5])$/);
+  if (!match) return undefined;
+  const prefix = match[1] === "R" ? "R" : "";
+  const normalized = /^(HIGH|HT)/.test(match[2]) ? "HT" : "LT";
+  return `${prefix}${normalized}${match[3]}`;
+}
+
 function buildModeUpdate(mode: string | undefined, tier: string) {
   if (!mode) return {};
   const updates: Partial<typeof playersTable.$inferInsert> = {};
@@ -243,8 +252,8 @@ router.post("/webhook/tier", async (req, res) => {
       return res.json({ ok: true });
     }
 
-    if (!tier) return res.status(400).json({ error: "Missing tier" });
-    const upperTier = tier.toUpperCase();
+    const upperTier = normalizeTier(tier);
+    if (!upperTier) return res.status(400).json({ error: "Invalid tier" });
     const isHighTier = HIGH_TIERS.has(upperTier);
     const modeUpdate = buildModeUpdate(normalizedMode, upperTier);
     const existingRows = await db.select().from(playersTable).where(where).limit(1);
@@ -318,9 +327,12 @@ router.post("/webhook/bulk-results", async (req, res) => {
     const { guildId, userId, username, tier, mode, region, ticketType, testerId, testerName, createdAt } = r;
     if (!guildId || !userId || !tier) { skipped++; continue; }
 
-    const upperTier = String(tier).toUpperCase();
+    const upperTier = normalizeTier(tier);
+    if (!upperTier) { skipped++; continue; }
+    const normalizedMode = normalizeMode(mode);
     const isHighTier = HIGH_TIERS.has(upperTier);
     const ts = typeof createdAt === "number" ? createdAt : Date.now();
+    if (!normalizedMode && ticketType !== "givetier") { skipped++; continue; }
 
     try {
       // Dedup: check for an existing row within ±10 s with same userId + mode
@@ -340,7 +352,6 @@ router.post("/webhook/bulk-results", async (req, res) => {
       }
       if (!resolvedUsername) { skipped++; continue; }
 
-      const normalizedMode = normalizeMode(mode);
       const existing = await db
         .select({ id: tierResultsTable.id, username: tierResultsTable.username })
         .from(tierResultsTable)
