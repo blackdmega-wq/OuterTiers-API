@@ -4,9 +4,10 @@ import { eq, desc, sql } from "drizzle-orm";
 
 const router = Router();
 const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
+const DISCORD_ID_RE = /^\d{17,20}$/;
 
 function hasPublishableMinecraftName(player: DbPlayer): boolean {
-  return MC_NAME_RE.test(String(player.username ?? "").trim());
+  return DISCORD_ID_RE.test(String(player.userId ?? "").trim()) && MC_NAME_RE.test(String(player.username ?? "").trim());
 }
 
 function rawTierToLevel(tier: string | null | undefined): string {
