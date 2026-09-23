@@ -4,6 +4,7 @@ import { db, playersTable } from "../lib/db.js";
 const router = Router();
 const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
 const MC_UUID_RE = /^[0-9a-f]{32}$/i;
+const DISCORD_ID_RE = /^\d{17,20}$/;
 
 function normalizeUuid(value: unknown): string | null {
   const compact = String(value ?? "").replace(/-/g, "").trim().toLowerCase();
@@ -53,7 +54,7 @@ router.post("/migrate", async (req, res) => {
       // This endpoint is a public-data boundary. A Discord nickname, a
       // ticket note, or a generated internal UUID must never enter the
       // website database as a Minecraft identity.
-      if (!p.guildId || !p.userId || !MC_NAME_RE.test(username) || !uuid) {
+      if (!p.guildId || !DISCORD_ID_RE.test(String(p.userId)) || !MC_NAME_RE.test(username) || !uuid) {
         skipped++;
         continue;
       }
