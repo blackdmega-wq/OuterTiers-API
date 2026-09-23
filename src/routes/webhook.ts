@@ -170,7 +170,7 @@ router.post("/webhook/tier", async (req, res) => {
         ? String(uuid).replace(/-/g, "").toLowerCase()
         : null;
       const existing = await db
-        .select({ id: playersTable.id, userId: playersTable.userId })
+        .select({ id: playersTable.id, userId: playersTable.userId, uuid: playersTable.uuid })
         .from(playersTable)
         .where(where)
         .limit(1);
@@ -197,6 +197,15 @@ router.post("/webhook/tier", async (req, res) => {
         );
       }
 
+      // A confirmed rename must never overwrite a different stored UUID.
+      // That would relabel an existing player and expose the wrong tier mirror.
+      const existingUuid = existing[0]?.uuid
+        ? String(existing[0].uuid).replace(/-/g, '').toLowerCase()
+        : null;
+      if (existing.length > 0 && existingUuid && normalizedUuid && existingUuid !== normalizedUuid) {
+        return res.status(409).json({ error: "Minecraft UUID does not match the stored player identity" });
+      }
+
       const playerUpdate: Partial<typeof playersTable.$inferInsert> = {
         username: verifiedUsername,
         updatedAt: now,
@@ -206,17 +215,10 @@ router.post("/webhook/tier", async (req, res) => {
       }
       if (existing.length > 0 || playerWhere !== where) {
         await db.update(playersTable).set(playerUpdate).where(playerWhere);
-      } else {
-        await db.insert(playersTable).values({
-          guildId,
-          userId,
-          username: verifiedUsername,
-          uuid: normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid) ? normalizedUuid : null,
-          discordUsername: null,
-          region: null,
-          updatedAt: now,
-        });
       }
+      // Do not create a bare player row from an identity-sync callback.
+      // A row without verified tier history becomes a ghost identity and can
+      // collide with the real player during username deduplication.
       // History is keyed by Discord userId; update denormalized names after MC renames.
       for (const historyUserId of historyUserIds) {
         await db.update(tierResultsTable).set({ username: verifiedUsername }).where(
