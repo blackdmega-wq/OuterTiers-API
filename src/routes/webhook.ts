@@ -103,6 +103,7 @@ router.post("/webhook/tier", async (req, res) => {
     const where = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId));
 
     if (type === "tierwipe") {
+      let updated = 0;
       const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
       if (existing.length === 0) {
         return res.status(404).json({ error: "Player not found for guildId and userId" });
@@ -115,7 +116,8 @@ router.post("/webhook/tier", async (req, res) => {
           if (Object.keys(modeWipe).length === 0) {
             return res.status(400).json({ error: "Unsupported tier mode" });
           }
-          await db.update(playersTable).set({ ...modeWipe, updatedAt: now }).where(where);
+          const result = await db.update(playersTable).set({ ...modeWipe, updatedAt: now }).where(where);
+          updated = Number(result.rowCount || 0);
         } else if (scope === "specific" && tier) {
           // Scope = specific tier level: only null out columns that currently hold
           // that exact tier value — leave columns with different tiers untouched.
@@ -135,16 +137,22 @@ router.post("/webhook/tier", async (req, res) => {
             if (p.axeTier      === upperTierToWipe) update.axeTier      = null;
             if (p.maceTier     === upperTierToWipe) update.maceTier     = null;
             if (p.smpTier      === upperTierToWipe) update.smpTier      = null;
-            await db.update(playersTable).set(update).where(where);
+            if (p.spearMaceTier === upperTierToWipe) update.spearMaceTier = null;
+            if (p.minecartTier  === upperTierToWipe) update.minecartTier  = null;
+            if (p.diamondSmpTier === upperTierToWipe) update.diamondSmpTier = null;
+            const result = await db.update(playersTable).set(update).where(where);
+            updated = Number(result.rowCount || 0);
           }
         } else {
           // scope === "all" or no scope: wipe every tier column.
-          await db.update(playersTable).set({
+          const result = await db.update(playersTable).set({
             currentTier: null, peakTier: null,
             ogvanillaTier: null, vanillaTier: null, uhcTier: null, potTier: null,
             nethopTier: null, smpTier: null, swordTier: null, axeTier: null,
-            maceTier: null, speedTier: null, updatedAt: now,
+            maceTier: null, speedTier: null, spearMaceTier: null, minecartTier: null,
+            diamondSmpTier: null, updatedAt: now,
           }).where(where);
+          updated = Number(result.rowCount || 0);
         }
       }
 
@@ -156,9 +164,9 @@ router.post("/webhook/tier", async (req, res) => {
       // Punishments are moderation records, not tier data, so they're left
       // alone here (that's what /deletetesthistory is for).
       if (!scope || scope === "all") {
-        await db.delete(tierResultsTable).where(eq(tierResultsTable.userId, userId));
+        await db.delete(tierResultsTable).where(and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, userId)));
       }
-      return res.json({ ok: true });
+      return res.json({ ok: true, updated });
     }
 
     if (type === "setpeaktier") {
