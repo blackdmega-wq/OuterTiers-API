@@ -126,6 +126,7 @@ router.get("/players", async (_req, res) => {
 // Discord ID lookup — called by the bot's /startqueue tier check when no IGN is linked.
 // Must be defined BEFORE /players/:username so Express does not treat "by-discord" as a username.
 router.get("/players/by-discord/:userId", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   const { userId } = req.params;
   try {
     const rows = await db.select().from(playersTable);
@@ -145,6 +146,7 @@ router.get("/players/by-discord/:userId", async (req, res) => {
 });
 
 router.get("/players/:username", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   const { username } = req.params;
   try {
     const rows = (await db.select().from(playersTable)).filter(hasPublishableMinecraftName);
