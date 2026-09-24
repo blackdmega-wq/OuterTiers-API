@@ -102,14 +102,18 @@ router.post("/webhook/tier", async (req, res) => {
 
     if (type === "tierwipe") {
       const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
+      if (existing.length === 0) {
+        return res.status(404).json({ error: "Player not found for guildId and userId" });
+      }
       if (existing.length > 0) {
-        if (scope === "mode" && mode) {
+        if (scope === "mode" && normalizedMode) {
           // Scope = specific gamemode: only null out that one mode's tier column.
           // Leave every other tier column (and currentTier / peakTier) intact.
-          const modeWipe = buildModeWipe(mode);
-          if (Object.keys(modeWipe).length > 0) {
-            await db.update(playersTable).set({ ...modeWipe, updatedAt: now }).where(where);
+          const modeWipe = buildModeWipe(normalizedMode);
+          if (Object.keys(modeWipe).length === 0) {
+            return res.status(400).json({ error: "Unsupported tier mode" });
           }
+          await db.update(playersTable).set({ ...modeWipe, updatedAt: now }).where(where);
         } else if (scope === "specific" && tier) {
           // Scope = specific tier level: only null out columns that currently hold
           // that exact tier value — leave columns with different tiers untouched.
