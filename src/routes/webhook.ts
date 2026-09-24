@@ -90,6 +90,8 @@ router.post("/webhook/tier", async (req, res) => {
           tier, peakTier, mode, region, testerId, testerName, ticketType, scope }
     = req.body as Record<string, string | undefined>;
   const normalizedMode = normalizeMode(mode);
+  const incomingUuid = uuid ? String(uuid).replace(/-/g, '').toLowerCase() : null;
+  const validIncomingUuid = incomingUuid && /^[0-9a-f]{32}$/.test(incomingUuid) ? incomingUuid : null;
 
   if (!secret || secret !== process.env.WEBSITE_API_SECRET)
     return res.status(401).json({ error: "Unauthorized" });
@@ -274,6 +276,7 @@ router.post("/webhook/tier", async (req, res) => {
       currentTier: upperTier, updatedAt: now, ...modeUpdate,
     };
     if (peakTier) playerBase.peakTier = peakTier.toUpperCase();
+    if (validIncomingUuid) playerBase.uuid = validIncomingUuid;
 
     if (existingRows.length > 0) {
       const existingRow = existingRows[0];
