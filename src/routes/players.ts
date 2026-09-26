@@ -1,12 +1,16 @@
 import { Router } from "express";
 import { db, playersTable, tierResultsTable, punishmentsTable, type DbPlayer } from "../lib/db.js";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, inArray } from "drizzle-orm";
 
 const router = Router();
 const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
 
 function hasPublishableMinecraftName(player: DbPlayer): boolean {
   return MC_NAME_RE.test(String(player.username ?? "").trim());
+}
+
+function discordIdsForPlayer(player: DbPlayer): string[] {
+  return [...new Set([player.userId, ...(player.discordUserIds ?? [])].filter(Boolean))];
 }
 
 function rawTierToLevel(tier: string | null | undefined): string {
@@ -43,6 +47,7 @@ function calculatePoints(p: DbPlayer): number {
 function dbPlayerToWeb(p: DbPlayer) {
   return {
     id: p.userId,
+    discordUserIds: discordIdsForPlayer(p),
     username: p.username,
     uuid: p.uuid ?? "",
     region: p.region ?? "EU",
@@ -130,7 +135,7 @@ router.get("/players/by-discord/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
     const rows = await db.select().from(playersTable);
-    const matches = rows.filter(p => p.userId === userId && hasPublishableMinecraftName(p));
+    const matches = rows.filter(p => discordIdsForPlayer(p).includes(userId) && hasPublishableMinecraftName(p));
     if (matches.length === 0) return res.status(404).json({ error: "Player not found" });
     // When a user appears under multiple guild IDs, pick the row with the most tier data,
     // falling back to the most recently updated row.
@@ -176,6 +181,7 @@ router.get("/players/:username", async (req, res) => {
       : matches[0];
     if (!row) return res.status(404).json({ error: "Player not found" });
 
+    const historyUserIds = discordIdsForPlayer(row);
     const history = await db
       .select({
         mode:      tierResultsTable.mode,
@@ -183,7 +189,7 @@ router.get("/players/:username", async (req, res) => {
         createdAt: tierResultsTable.createdAt,
       })
       .from(tierResultsTable)
-      .where(eq(tierResultsTable.userId, row.userId))
+      .where(inArray(tierResultsTable.userId, historyUserIds))
       .orderBy(desc(tierResultsTable.createdAt));
 
     const modeCurrentTier: Record<string, string | null | undefined> = {
@@ -267,20 +273,22 @@ router.get("/players/:username/history", async (req, res) => {
             ? cur : best)
       : matchingPlayers[0];
 
+    const playerHistoryUserIds = player ? discordIdsForPlayer(player) : [];
+
     // Query tier_results and punishments by userId if player exists, otherwise by username directly.
     // This ensures results are returned even if the player isn't in the players table yet
     // (e.g. history was backfilled via /synctesthistory before the player was registered).
     const [testResults, punishments] = await Promise.all([
       player
         ? db.select().from(tierResultsTable)
-            .where(eq(tierResultsTable.userId, player.userId))
+            .where(inArray(tierResultsTable.userId, playerHistoryUserIds))
             .orderBy(desc(tierResultsTable.createdAt))
         : db.select().from(tierResultsTable)
             .where(sql`lower(${tierResultsTable.username}) = ${username.toLowerCase()}`)
             .orderBy(desc(tierResultsTable.createdAt)),
       player
         ? db.select().from(punishmentsTable)
-            .where(eq(punishmentsTable.userId, player.userId))
+            .where(inArray(punishmentsTable.userId, playerHistoryUserIds))
             .orderBy(desc(punishmentsTable.createdAt))
         : db.select().from(punishmentsTable)
             .where(sql`lower(${punishmentsTable.username}) = ${username.toLowerCase()}`)
