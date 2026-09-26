@@ -13,6 +13,7 @@ function normalizeUuid(value: unknown): string | null {
 interface MigratePlayer {
   guildId: string;
   userId: string;
+  discordUserIds?: string[];
   username: string;
   uuid?: string | null;
   currentTier?: string | null;
@@ -61,6 +62,9 @@ router.post("/migrate", async (req, res) => {
       const record = {
         guildId: p.guildId,
         userId: p.userId,
+        discordUserIds: Array.isArray(p.discordUserIds) && p.discordUserIds.length > 0
+          ? [...new Set(p.discordUserIds.map(String).filter(Boolean).concat(p.userId))]
+          : [p.userId],
         username,
         uuid,
         currentTier: p.currentTier || null,
