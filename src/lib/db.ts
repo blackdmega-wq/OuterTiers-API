@@ -4,8 +4,9 @@ import { setDefaultResultOrder } from "node:dns";
 setDefaultResultOrder("ipv4first");
 
 import { drizzle } from "drizzle-orm/node-postgres";
+import { sql } from "drizzle-orm";
 import pg from "pg";
-import { pgTable, serial, text, bigint, boolean, unique, sql } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, bigint, boolean, unique } from "drizzle-orm/pg-core";
 
 const { Pool } = pg;
 

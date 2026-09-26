@@ -87,8 +87,8 @@ function requireSecret(req: any, res: any): boolean {
 
 router.post("/webhook/tier", async (req, res) => {
   const { secret, type, guildId, userId, username, discordUsername, uuid,
-          tier, peakTier, mode, region, testerId, testerName, ticketType, scope }
-    = req.body as Record<string, string | undefined>;
+          tier, peakTier, mode, region, testerId, testerName, ticketType, scope, createdAt }
+    = req.body as Record<string, any>;
   const normalizedMode = normalizeMode(mode);
   const incomingUuid = uuid ? String(uuid).replace(/-/g, '').toLowerCase() : null;
   const validIncomingUuid = incomingUuid && /^[0-9a-f]{32}$/.test(incomingUuid) ? incomingUuid : null;
@@ -100,6 +100,9 @@ router.post("/webhook/tier", async (req, res) => {
 
   try {
     const now = Date.now();
+    const eventTimestamp = typeof createdAt === "number" && Number.isFinite(createdAt)
+      ? createdAt
+      : now;
     const where = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId));
 
     if (type === "tierwipe") {
@@ -270,6 +273,26 @@ router.post("/webhook/tier", async (req, res) => {
     if (!upperTier) return res.status(400).json({ error: "Invalid tier" });
     const isHighTier = HIGH_TIERS.has(upperTier);
     const modeUpdate = buildModeUpdate(normalizedMode, upperTier);
+
+    // Result commands retry after timeouts. Treat the same event as idempotent
+    // so a successful request followed by a lost response does not duplicate
+    // the public history row.
+    const duplicate = await db
+      .select({ id: tierResultsTable.id })
+      .from(tierResultsTable)
+      .where(and(
+        eq(tierResultsTable.guildId, guildId),
+        eq(tierResultsTable.userId, userId),
+        eq(tierResultsTable.tier, upperTier),
+        normalizedMode
+          ? and(eq(tierResultsTable.mode, normalizedMode), between(tierResultsTable.createdAt, eventTimestamp - 10_000, eventTimestamp + 10_000))
+          : between(tierResultsTable.createdAt, eventTimestamp - 10_000, eventTimestamp + 10_000),
+      ))
+      .limit(1);
+    if (duplicate.length > 0) {
+      return res.json({ ok: true, duplicate: true });
+    }
+
     const existingRows = await db.select().from(playersTable).where(where).limit(1);
     const incomingUsername = username && MC_NAME_RE.test(username.trim()) ? username.trim() : null;
     const storedUsername = existingRows[0]?.username;
@@ -281,7 +304,7 @@ router.post("/webhook/tier", async (req, res) => {
 
     const playerBase: typeof playersTable.$inferInsert = {
       guildId, userId, username: displayName, discordUsername, region,
-      currentTier: upperTier, updatedAt: now, ...modeUpdate,
+      currentTier: upperTier, updatedAt: eventTimestamp, ...modeUpdate,
     };
     if (peakTier) playerBase.peakTier = peakTier.toUpperCase();
     if (validIncomingUuid) playerBase.uuid = validIncomingUuid;
@@ -311,7 +334,7 @@ router.post("/webhook/tier", async (req, res) => {
 
     await db.insert(tierResultsTable).values({
       guildId, userId, username: displayName, testerId, testerName,
-      tier: upperTier, mode: normalizedMode ?? null, region, ticketType, isHighTier, createdAt: now,
+      tier: upperTier, mode: normalizedMode ?? null, region, ticketType, isHighTier, createdAt: eventTimestamp,
     });
 
     return res.json({ ok: true });
