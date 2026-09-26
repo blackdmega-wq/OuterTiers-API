@@ -5,7 +5,7 @@ setDefaultResultOrder("ipv4first");
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { pgTable, serial, text, bigint, boolean, unique } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, bigint, boolean, unique, sql } from "drizzle-orm/pg-core";
 
 const { Pool } = pg;
 
@@ -19,6 +19,7 @@ export const playersTable = pgTable(
     id: serial("id").primaryKey(),
     guildId: text("guild_id").notNull(),
     userId: text("user_id").notNull(),
+    discordUserIds: text("discord_user_ids").array().notNull().default(sql`ARRAY[]::text[]`),
     username: text("username").notNull(),
     discordUsername: text("discord_username"),
     uuid: text("uuid"),
