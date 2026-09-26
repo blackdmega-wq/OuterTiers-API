@@ -10,6 +10,7 @@ async function ensureSchema() {
       id SERIAL PRIMARY KEY,
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
+      discord_user_ids TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
       username TEXT NOT NULL,
       discord_username TEXT,
       uuid TEXT,
@@ -62,6 +63,7 @@ async function ensureSchema() {
   await pool.query(`
     ALTER TABLE players
       ADD COLUMN IF NOT EXISTS discord_username TEXT,
+      ADD COLUMN IF NOT EXISTS discord_user_ids TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
       ADD COLUMN IF NOT EXISTS uuid TEXT,
       ADD COLUMN IF NOT EXISTS region TEXT,
       ADD COLUMN IF NOT EXISTS current_tier TEXT,
@@ -79,6 +81,11 @@ async function ensureSchema() {
       ADD COLUMN IF NOT EXISTS spear_mace_tier TEXT,
       ADD COLUMN IF NOT EXISTS minecart_tier TEXT,
       ADD COLUMN IF NOT EXISTS diamond_smp_tier TEXT
+  `);
+  await pool.query(`
+    UPDATE players
+    SET discord_user_ids = ARRAY[user_id]
+    WHERE discord_user_ids IS NULL OR cardinality(discord_user_ids) = 0
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS punishments (
