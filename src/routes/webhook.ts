@@ -124,7 +124,10 @@ router.post("/webhook/tier", async (req, res) => {
         } else if (scope === "specific" && tier) {
           // Scope = specific tier level: only null out columns that currently hold
           // that exact tier value — leave columns with different tiers untouched.
-          const upperTierToWipe = tier.toUpperCase();
+          const upperTierToWipe = normalizeTier(tier);
+          if (!upperTierToWipe) {
+            return res.status(400).json({ error: "Unsupported tier" });
+          }
           const rows = await db.select().from(playersTable).where(where).limit(1);
           if (rows.length > 0) {
             const p = rows[0];
