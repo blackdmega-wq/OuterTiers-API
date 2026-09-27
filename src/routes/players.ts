@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, playersTable, tierResultsTable, punishmentsTable, type DbPlayer } from "../lib/db.js";
+import { db, playersTable, playerNameHistoryTable, tierResultsTable, punishmentsTable, type DbPlayer } from "../lib/db.js";
 import { eq, desc, sql, inArray } from "drizzle-orm";
 
 const router = Router();
@@ -191,6 +191,15 @@ router.get("/players/:username", async (req, res) => {
       .from(tierResultsTable)
       .where(inArray(tierResultsTable.userId, historyUserIds))
       .orderBy(desc(tierResultsTable.createdAt));
+    const nameHistory = await db
+      .select({
+        username: playerNameHistoryTable.username,
+        uuid: playerNameHistoryTable.uuid,
+        observedAt: playerNameHistoryTable.observedAt,
+      })
+      .from(playerNameHistoryTable)
+      .where(inArray(playerNameHistoryTable.userId, historyUserIds))
+      .orderBy(desc(playerNameHistoryTable.observedAt), desc(playerNameHistoryTable.id));
 
     const modeCurrentTier: Record<string, string | null | undefined> = {
       ogvanilla: row.ogvanillaTier, vanilla: row.vanillaTier, uhc: row.uhcTier,
@@ -244,7 +253,7 @@ router.get("/players/:username", async (req, res) => {
       }
     }
 
-    return res.json({ ...dbPlayerToWeb(row), tierDates, peakTiers });
+    return res.json({ ...dbPlayerToWeb(row), tierDates, peakTiers, nameHistory });
   } catch (err) {
     console.error("[/api/players/:username] DB error:", (err as Error).message);
     return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
@@ -278,7 +287,7 @@ router.get("/players/:username/history", async (req, res) => {
     // Query tier_results and punishments by userId if player exists, otherwise by username directly.
     // This ensures results are returned even if the player isn't in the players table yet
     // (e.g. history was backfilled via /synctesthistory before the player was registered).
-    const [testResults, punishments] = await Promise.all([
+    const [testResults, punishments, nameHistory] = await Promise.all([
       player
         ? db.select().from(tierResultsTable)
             .where(inArray(tierResultsTable.userId, playerHistoryUserIds))
@@ -293,13 +302,28 @@ router.get("/players/:username/history", async (req, res) => {
         : db.select().from(punishmentsTable)
             .where(sql`lower(${punishmentsTable.username}) = ${username.toLowerCase()}`)
             .orderBy(desc(punishmentsTable.createdAt)),
+      player
+        ? db.select({
+            username: playerNameHistoryTable.username,
+            uuid: playerNameHistoryTable.uuid,
+            observedAt: playerNameHistoryTable.observedAt,
+          }).from(playerNameHistoryTable)
+            .where(inArray(playerNameHistoryTable.userId, playerHistoryUserIds))
+            .orderBy(desc(playerNameHistoryTable.observedAt), desc(playerNameHistoryTable.id))
+        : db.select({
+            username: playerNameHistoryTable.username,
+            uuid: playerNameHistoryTable.uuid,
+            observedAt: playerNameHistoryTable.observedAt,
+          }).from(playerNameHistoryTable)
+            .where(sql`lower(${playerNameHistoryTable.username}) = ${username.toLowerCase()}`)
+            .orderBy(desc(playerNameHistoryTable.observedAt), desc(playerNameHistoryTable.id)),
     ]);
 
     if (!player && testResults.length === 0 && punishments.length === 0) {
       return res.status(404).json({ error: "Player not found" });
     }
 
-    return res.json({ testResults, punishments });
+    return res.json({ testResults, punishments, nameHistory });
   } catch (err) {
     console.error("[/api/players/:username/history] DB error:", (err as Error).message);
     return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });

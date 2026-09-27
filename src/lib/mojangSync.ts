@@ -1,4 +1,4 @@
-import { db, playersTable, tierResultsTable, punishmentsTable } from "./db.js";
+import { db, playersTable, playerNameHistoryTable, tierResultsTable, punishmentsTable } from "./db.js";
 import { eq, and, isNull } from "drizzle-orm";
 import { logger } from "./logger.js";
 
@@ -85,6 +85,9 @@ export async function syncAllPlayers(): Promise<{ synced: number; renamed: numbe
         await db.update(playersTable)
           .set({ uuid, updatedAt: Date.now() })
           .where(eq(playersTable.id, player.id));
+        await db.insert(playerNameHistoryTable)
+          .values({ guildId: player.guildId, userId: player.userId, uuid, username: player.username, observedAt: Date.now() })
+          .onConflictDoNothing();
         synced++;
         logger.info({ username: player.username, uuid }, "UUID synced");
       } else {
@@ -105,6 +108,9 @@ export async function syncAllPlayers(): Promise<{ synced: number; renamed: numbe
             await db.update(playersTable)
               .set({ uuid: resolvedUuid, updatedAt: Date.now() })
               .where(eq(playersTable.id, player.id));
+            await db.insert(playerNameHistoryTable)
+              .values({ guildId: player.guildId, userId: player.userId, uuid: resolvedUuid, username: player.username, observedAt: Date.now() })
+              .onConflictDoNothing();
             synced++;
             logger.info({ username: player.username, oldUuid: storedUuid, uuid: resolvedUuid }, "Generated UUID replaced");
           }
@@ -119,9 +125,15 @@ export async function syncAllPlayers(): Promise<{ synced: number; renamed: numbe
         const oldName = player.username;
         await db.transaction(async (tx) => {
           const update = { username: currentName, uuid: storedUuid, updatedAt: Date.now() };
+          await tx.insert(playerNameHistoryTable)
+            .values({ guildId: player.guildId, userId: player.userId, uuid: storedUuid, username: oldName, observedAt: Date.now() })
+            .onConflictDoNothing();
           await tx.update(playersTable)
             .set(update)
             .where(eq(playersTable.id, player.id));
+          await tx.insert(playerNameHistoryTable)
+            .values({ guildId: player.guildId, userId: player.userId, uuid: storedUuid, username: currentName, observedAt: Date.now() })
+            .onConflictDoNothing();
           // Keep feeds and profile history consistent with the canonical
           // Minecraft name. The profile itself is keyed by Discord user ID,
           // so old history rows must be updated by guild + user as well.

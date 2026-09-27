@@ -1,10 +1,24 @@
 import { Router } from "express";
 import { syncAllPlayers } from "../lib/mojangSync.js";
-import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.js";
+import { db, playersTable, playerNameHistoryTable, tierResultsTable, punishmentsTable } from "../lib/db.js";
 import { and, eq, desc, sql, ilike, or, inArray } from "drizzle-orm";
 
 const router = Router();
 const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
+
+async function recordPlayerName(
+  guildId: string,
+  userId: string,
+  username: string | null | undefined,
+  uuid: string | null | undefined,
+  observedAt: number,
+) {
+  const name = String(username || "").trim();
+  if (!MC_NAME_RE.test(name)) return;
+  await db.insert(playerNameHistoryTable)
+    .values({ guildId, userId, uuid: uuid || null, username: name, observedAt })
+    .onConflictDoNothing();
+}
 
 function requireSecret(req: any, res: any): boolean {
   const secret = (req.headers["x-admin-secret"] as string) || req.body?.secret;
@@ -35,9 +49,16 @@ router.post("/admin/fix-username", async (req, res) => {
   }
   const verifiedUsername = newUsername.trim();
   const where = and(eq(playersTable.guildId, guildId), eq(playersTable.userId, userId));
-  const existing = await db.select({ id: playersTable.id }).from(playersTable).where(where).limit(1);
+  const existing = await db.select({
+    id: playersTable.id,
+    username: playersTable.username,
+    uuid: playersTable.uuid,
+  }).from(playersTable).where(where).limit(1);
   if (!existing.length) return res.status(404).json({ error: "Player not found" });
-  await db.update(playersTable).set({ username: verifiedUsername, updatedAt: Date.now() }).where(where);
+  const now = Date.now();
+  await recordPlayerName(guildId, userId, existing[0].username, existing[0].uuid, now);
+  await db.update(playersTable).set({ username: verifiedUsername, updatedAt: now }).where(where);
+  await recordPlayerName(guildId, userId, verifiedUsername, existing[0].uuid, now);
   await db.update(tierResultsTable).set({ username: verifiedUsername }).where(
     and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, userId)),
   );

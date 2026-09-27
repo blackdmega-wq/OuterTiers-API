@@ -45,6 +45,19 @@ export const playersTable = pgTable(
   (t) => [unique("players_guild_user").on(t.guildId, t.userId)]
 );
 
+export const playerNameHistoryTable = pgTable(
+  "player_name_history",
+  {
+    id: serial("id").primaryKey(),
+    guildId: text("guild_id").notNull(),
+    userId: text("user_id").notNull(),
+    uuid: text("uuid"),
+    username: text("username").notNull(),
+    observedAt: bigint("observed_at", { mode: "number" }).notNull(),
+  },
+  (t) => [unique("player_name_history_entry").on(t.guildId, t.userId, t.username)]
+);
+
 export const tierResultsTable = pgTable("tier_results", {
   id: serial("id").primaryKey(),
   guildId: text("guild_id").notNull(),
@@ -93,4 +106,4 @@ pool.on("error", (err) => {
   console.error("[DB] Unexpected pool error:", err.message);
 });
 
-export const db = drizzle(pool, { schema: { playersTable, tierResultsTable, punishmentsTable } });
+export const db = drizzle(pool, { schema: { playersTable, playerNameHistoryTable, tierResultsTable, punishmentsTable } });

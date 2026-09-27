@@ -83,6 +83,32 @@ async function ensureSchema() {
       ADD COLUMN IF NOT EXISTS diamond_smp_tier TEXT
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS player_name_history (
+      id SERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      uuid TEXT,
+      username TEXT NOT NULL,
+      observed_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::BIGINT
+    )
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS player_name_history_identity
+      ON player_name_history (guild_id, user_id, lower(username))
+  `);
+  await pool.query(`
+    INSERT INTO player_name_history (guild_id, user_id, uuid, username, observed_at)
+    SELECT guild_id, user_id, uuid, username, updated_at
+    FROM players p
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM player_name_history h
+      WHERE h.guild_id = p.guild_id
+        AND h.user_id = p.user_id
+        AND lower(h.username) = lower(p.username)
+    )
+  `);
+  await pool.query(`
     UPDATE players
     SET discord_user_ids = ARRAY[user_id]
     WHERE discord_user_ids IS NULL OR cardinality(discord_user_ids) = 0

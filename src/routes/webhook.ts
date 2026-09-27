@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, playersTable, tierResultsTable, punishmentsTable } from "../lib/db.js";
+import { db, playersTable, playerNameHistoryTable, tierResultsTable, punishmentsTable } from "../lib/db.js";
 import { and, eq, between, desc, isNull } from "drizzle-orm";
 
 const router = Router();
@@ -81,6 +81,26 @@ function requireSecret(req: any, res: any): boolean {
   if (!secret || secret !== process.env.WEBSITE_API_SECRET)
     return (res.status(401).json({ error: "Unauthorized" }), false);
   return true;
+}
+
+async function recordPlayerName(
+  guildId: string,
+  userId: string,
+  username: string | null | undefined,
+  uuid: string | null | undefined,
+  observedAt: number,
+) {
+  const name = String(username || "").trim();
+  if (!MC_NAME_RE.test(name)) return;
+  await db.insert(playerNameHistoryTable)
+    .values({
+      guildId,
+      userId,
+      uuid: uuid || null,
+      username: name,
+      observedAt,
+    })
+    .onConflictDoNothing();
 }
 
 // ── Single tier result (posted in real-time when a test is completed) ─────────
@@ -199,7 +219,12 @@ router.post("/webhook/tier", async (req, res) => {
         ? String(uuid).replace(/-/g, "").toLowerCase()
         : null;
       const existing = await db
-        .select({ id: playersTable.id, userId: playersTable.userId, uuid: playersTable.uuid })
+        .select({
+          id: playersTable.id,
+          userId: playersTable.userId,
+          username: playersTable.username,
+          uuid: playersTable.uuid,
+        })
         .from(playersTable)
         .where(where)
         .limit(1);
@@ -212,7 +237,12 @@ router.post("/webhook/tier", async (req, res) => {
       // create the minimal player row as a last resort.
       if (existing.length === 0 && normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid)) {
         const byUuid = await db
-          .select({ id: playersTable.id, userId: playersTable.userId })
+          .select({
+            id: playersTable.id,
+            userId: playersTable.userId,
+            username: playersTable.username,
+            uuid: playersTable.uuid,
+          })
           .from(playersTable)
           .where(and(eq(playersTable.guildId, guildId), eq(playersTable.uuid, normalizedUuid)))
           .limit(1);
@@ -226,14 +256,28 @@ router.post("/webhook/tier", async (req, res) => {
         );
       }
 
+      const target = existing[0] ?? (
+        playerWhere !== where
+          ? await db.select({
+              username: playersTable.username,
+              uuid: playersTable.uuid,
+              userId: playersTable.userId,
+            }).from(playersTable).where(playerWhere).limit(1).then(rows => rows[0])
+          : undefined
+      );
+      if (!target) {
+        return res.status(404).json({ error: "Player not found" });
+      }
+
       // A confirmed rename must never overwrite a different stored UUID.
       // That would relabel an existing player and expose the wrong tier mirror.
-      const existingUuid = existing[0]?.uuid
-        ? String(existing[0].uuid).replace(/-/g, '').toLowerCase()
+      const existingUuid = target.uuid
+        ? String(target.uuid).replace(/-/g, '').toLowerCase()
         : null;
-      if (existing.length > 0 && existingUuid && normalizedUuid && existingUuid !== normalizedUuid) {
+      if (existingUuid && normalizedUuid && existingUuid !== normalizedUuid) {
         return res.status(409).json({ error: "Minecraft UUID does not match the stored player identity" });
       }
+      await recordPlayerName(guildId, target.userId, target.username, target.uuid, now);
 
       const playerUpdate: Partial<typeof playersTable.$inferInsert> = {
         username: verifiedUsername,
@@ -242,9 +286,7 @@ router.post("/webhook/tier", async (req, res) => {
       if (normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid)) {
         playerUpdate.uuid = normalizedUuid;
       }
-      if (existing.length > 0 || playerWhere !== where) {
-        await db.update(playersTable).set(playerUpdate).where(playerWhere);
-      }
+      await db.update(playersTable).set(playerUpdate).where(playerWhere);
       // Do not create a bare player row from an identity-sync callback.
       // A row without verified tier history becomes a ghost identity and can
       // collide with the real player during username deduplication.
@@ -256,6 +298,7 @@ router.post("/webhook/tier", async (req, res) => {
         await db.update(punishmentsTable).set({ username: verifiedUsername }).where(
           and(eq(punishmentsTable.guildId, guildId), eq(punishmentsTable.userId, historyUserId)),
         );
+        await recordPlayerName(guildId, historyUserId, verifiedUsername, normalizedUuid || existingUuid, now);
       }
       return res.json({ ok: true });
     }
@@ -322,6 +365,7 @@ router.post("/webhook/tier", async (req, res) => {
 
     if (existingRows.length > 0) {
       const existingRow = existingRows[0];
+      await recordPlayerName(guildId, userId, existingRow.username, existingRow.uuid, eventTimestamp);
       const updateData: Partial<typeof playersTable.$inferInsert> = { ...playerBase };
 
       // Never overwrite a real MC IGN with a Discord-username or userId fallback.
@@ -342,6 +386,7 @@ router.post("/webhook/tier", async (req, res) => {
     } else {
       await db.insert(playersTable).values(playerBase);
     }
+    await recordPlayerName(guildId, userId, displayName, validIncomingUuid || existingRows[0]?.uuid, eventTimestamp);
 
     await db.insert(tierResultsTable).values({
       guildId, userId, username: displayName, testerId, testerName,
@@ -751,6 +796,9 @@ router.post("/webhook/account-transfer", async (req, res) => {
 
     // 5. Delete the old player record — it is now a stale duplicate
     await db.delete(playersTable).where(oldWhere);
+    await db.update(playerNameHistoryTable)
+      .set({ userId: newUserId })
+      .where(and(eq(playerNameHistoryTable.guildId, guildId), eq(playerNameHistoryTable.userId, oldUserId)));
 
     console.log(`[/api/webhook/account-transfer] Transferred ${oldUserId} -> ${newUserId} in guild ${guildId} (IGN: ${old.username})`);
     return res.json({ ok: true, transferred: true, username: old.username });

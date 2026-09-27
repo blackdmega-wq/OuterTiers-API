@@ -130,6 +130,21 @@ async function ensureSchema(env) {
       await run(env, "ALTER TABLE tier_results ADD COLUMN source_channel_id TEXT").catch(() => {});
       await run(env, "ALTER TABLE tier_results ADD COLUMN source_message_id TEXT").catch(() => {});
       await run(env, "CREATE UNIQUE INDEX IF NOT EXISTS tier_results_source_idx ON tier_results(source_channel_id, source_message_id) WHERE source_message_id IS NOT NULL").catch(() => {});
+      await run(env, `
+        CREATE TABLE IF NOT EXISTS player_name_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          guild_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          uuid TEXT,
+          username TEXT NOT NULL,
+          observed_at INTEGER NOT NULL
+        )
+      `);
+      await run(env, "CREATE UNIQUE INDEX IF NOT EXISTS player_name_history_identity ON player_name_history(guild_id, user_id, lower(username))").catch(() => {});
+      const existingPlayers = await all(env, "SELECT guild_id, user_id, uuid, username, updated_at FROM players");
+      for (const player of existingPlayers) {
+        await recordPlayerName(env, player.guild_id, player.user_id, player.username, player.uuid, Number(player.updated_at) || Date.now());
+      }
     })().catch((error) => {
       schemaPromise = null;
       throw error;
@@ -145,6 +160,15 @@ function suppliedSecret(request, body) {
 function authorized(request, body, env, admin = false) {
   const expected = admin ? env.ADMIN_SECRET : env.WEBSITE_API_SECRET;
   return !expected || suppliedSecret(request, body) === expected;
+}
+
+async function recordPlayerName(env, guildId, userId, username, uuid, observedAt = Date.now()) {
+  const name = String(username || "").trim();
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(name)) return;
+  await run(env, `
+    INSERT OR IGNORE INTO player_name_history (guild_id, user_id, uuid, username, observed_at)
+    VALUES (?, ?, ?, ?, ?)
+  `, guildId, userId, uuid || null, name, observedAt);
 }
 
 async function upsertPlayer(env, player) {
@@ -171,6 +195,7 @@ async function upsertPlayer(env, player) {
       peak_tier = COALESCE(excluded.peak_tier, players.peak_tier),
       updated_at = excluded.updated_at
   `, guildId, userId, username, uuid, region, currentTier, peakTier, Date.now());
+  await recordPlayerName(env, guildId, userId, username, uuid, Date.now());
   return true;
 }
 
@@ -286,6 +311,9 @@ async function handlePlayers(env, parts) {
     const punishmentRows = player
       ? await all(env, "SELECT * FROM punishments WHERE lower(username) = lower(?) OR user_id = ? ORDER BY created_at DESC", username, player.user_id)
       : await all(env, "SELECT * FROM punishments WHERE lower(username) = lower(?) ORDER BY created_at DESC", username);
+    const nameHistoryRows = player
+      ? await all(env, "SELECT username, uuid, observed_at FROM player_name_history WHERE user_id = ? ORDER BY observed_at DESC, id DESC", player.user_id)
+      : await all(env, "SELECT username, uuid, observed_at FROM player_name_history WHERE lower(username) = lower(?) ORDER BY observed_at DESC, id DESC", username);
 
     return json({
       testResults: resultRows.map(buildResult),
@@ -302,6 +330,11 @@ async function handlePlayers(env, parts) {
         moderatorName: row.moderator_name || null,
         createdAt: Number(row.created_at),
       })),
+      nameHistory: nameHistoryRows.map((row) => ({
+        username: row.username,
+        uuid: row.uuid || null,
+        observedAt: Number(row.observed_at),
+      })),
     }, 200, { "cache-control": "public, max-age=30" });
   }
 
@@ -309,9 +342,18 @@ async function handlePlayers(env, parts) {
 
   const username = decodeURIComponent(parts[1] || "");
   const row = await first(env, "SELECT * FROM players WHERE lower(username) = lower(?) ORDER BY updated_at DESC LIMIT 1", username);
-  return row
-    ? json(buildPlayer(row), 200, { "cache-control": "public, max-age=30" })
-    : json({ error: "Player not found" }, 404);
+  if (!row) return json({ error: "Player not found" }, 404);
+  const nameHistory = await all(env,
+    "SELECT username, uuid, observed_at FROM player_name_history WHERE user_id = ? ORDER BY observed_at DESC, id DESC",
+    row.user_id);
+  return json({
+    ...buildPlayer(row),
+    nameHistory: nameHistory.map((entry) => ({
+      username: entry.username,
+      uuid: entry.uuid || null,
+      observedAt: Number(entry.observed_at),
+    })),
+  }, 200, { "cache-control": "public, max-age=30" });
 }
 
 async function handleRequest(request, env) {
@@ -400,6 +442,45 @@ async function handleRequest(request, env) {
 
     if (parts[1] === "tier") {
       if (!body.guildId || !body.userId) return json({ error: "guildId and userId are required" }, 400);
+
+      if (body.type === "update-username") {
+        const username = String(body.username || "").trim();
+        if (!/^[A-Za-z0-9_]{3,16}$/.test(username)) {
+          return json({ error: "A valid Minecraft username is required" }, 422);
+        }
+        const normalizedUuid = body.uuid
+          ? String(body.uuid).replace(/-/g, "").toLowerCase()
+          : null;
+        const existing = await first(env,
+          "SELECT * FROM players WHERE guild_id = ? AND user_id = ? LIMIT 1",
+          body.guildId, body.userId);
+        let target = existing;
+        let historyUserIds = [String(body.userId)];
+        if (!target && normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid)) {
+          target = await first(env,
+            "SELECT * FROM players WHERE guild_id = ? AND lower(uuid) = lower(?) LIMIT 1",
+            body.guildId, normalizedUuid);
+          if (target) historyUserIds = [...new Set([String(body.userId), String(target.user_id)])];
+        }
+        if (!target) return json({ error: "Player not found" }, 404);
+        const storedUuid = target.uuid ? String(target.uuid).replace(/-/g, "").toLowerCase() : null;
+        if (storedUuid && normalizedUuid && storedUuid !== normalizedUuid) {
+          return json({ error: "Minecraft UUID does not match the stored player identity" }, 409);
+        }
+        await recordPlayerName(env, target.guild_id, target.user_id, target.username, storedUuid, Date.now());
+        await run(env, `
+          UPDATE players SET username = ?, uuid = COALESCE(?, uuid), updated_at = ?
+          WHERE id = ?
+        `, username, normalizedUuid, Date.now(), target.id);
+        for (const historyUserId of historyUserIds) {
+          await run(env, "UPDATE tier_results SET username = ? WHERE guild_id = ? AND user_id = ?",
+            username, body.guildId, historyUserId);
+          await run(env, "UPDATE punishments SET username = ? WHERE guild_id = ? AND user_id = ?",
+            username, body.guildId, historyUserId);
+          await recordPlayerName(env, body.guildId, historyUserId, username, normalizedUuid || storedUuid, Date.now());
+        }
+        return json({ ok: true });
+      }
 
       // tierwipe must clear the requested player column, not perform a normal upsert.
       if (body.type === "tierwipe") {
