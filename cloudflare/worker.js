@@ -182,6 +182,19 @@ async function updateModeTier(env, guildId, userId, mode, tier) {
     tier, tier, Date.now(), guildId, userId);
 }
 
+async function repairModeTierFromHistory(env, guildId, userId, mode) {
+  const normalizedMode = normalizeMode(mode);
+  const column = normalizedMode ? MODE_COLUMNS[normalizedMode] : null;
+  if (!column) return false;
+  const latest = await first(env,
+    "SELECT tier FROM tier_results WHERE guild_id = ? AND user_id = ? AND mode = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    guildId, userId, normalizedMode);
+  if (!latest || !latest.tier) return false;
+  await run(env, `UPDATE players SET ${column} = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?`,
+    latest.tier, Date.now(), guildId, userId);
+  return true;
+}
+
 async function insertResult(env, result) {
   const {
     guildId,
@@ -416,8 +429,18 @@ async function handleRequest(request, env) {
       }
 
       if (!body.username) return json({ error: "guildId, userId and username are required" }, 400);
-      await upsertPlayer(env, body);
-      if (body.tier) await insertResult(env, body);
+      await upsertPlayer(env, {
+        ...body,
+        // The webhook uses tier; map it explicitly to the player mirror.
+        currentTier: body.tier ?? body.currentTier ?? null,
+      });
+      if (body.tier) {
+        await insertResult(env, { ...body, currentTier: body.tier });
+        // Repair the denormalized mode column when an older history row was
+        // written without updating the player mirror.
+        const normalizedMode = normalizeMode(body.mode);
+        if (normalizedMode) await repairModeTierFromHistory(env, body.guildId, body.userId, normalizedMode);
+      }
       return json({ ok: true });
     }
 
