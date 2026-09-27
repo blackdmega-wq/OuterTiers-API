@@ -199,13 +199,19 @@ async function upsertPlayer(env, player) {
   return true;
 }
 
-async function updateModeTier(env, guildId, userId, mode, tier) {
-  const normalizedMode = normalizeMode(mode);
-  const column = normalizedMode ? MODE_COLUMNS[normalizedMode] : null;
-  if (!column) return;
-  await run(env, `UPDATE players SET ${column} = ?, current_tier = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?`,
-    tier, tier, Date.now(), guildId, userId);
-}
+async function updateModeTier(env, guildId, userId, mode, tier, options = {}) {
+    const normalizedMode = normalizeMode(mode);
+    const column = normalizedMode ? MODE_COLUMNS[normalizedMode] : null;
+    if (!column) return;
+    const now = Date.now();
+    if (options.updateCurrentTier === false) {
+      await run(`UPDATE players SET ${column} = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?`,
+        tier, now, guildId, userId);
+      return;
+    }
+    await run(`UPDATE players SET ${column} = ?, current_tier = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?`,
+      tier, tier, now, guildId, userId);
+    }
 
 async function repairModeTierFromHistory(env, guildId, userId, mode) {
   const normalizedMode = normalizeMode(mode);
@@ -415,21 +421,26 @@ async function handleRequest(request, env) {
   }
 
   if (request.method === "POST" && parts[0] === "migrate") {
-    const body = await request.json().catch(() => ({}));
-    if (!authorized(request, body, env) || !Array.isArray(body.players)) return json({ error: "Unauthorized or invalid players" }, 401);
-    let inserted = 0;
-    for (const player of body.players) {
-      if (await upsertPlayer(env, player)) {
-        for (const [mode, tier] of Object.entries(player)) {
-          if (mode.endsWith("Tier") && tier) await updateModeTier(env, player.guildId, player.userId, mode.slice(0, -4), tier);
+      const body = await request.json().catch(() => ({}));
+      if (!authorized(request, body, env) || !Array.isArray(body.players)) return json({ error: "Unauthorized or invalid players" }, 401);
+      let inserted = 0;
+      for (const player of body.players) {
+        if (await upsertPlayer(env, player)) {
+          // Snapshots contain one field per mode. The old worker only upserted the
+          // base player row, so /syncwebsite reported success while mode columns
+          // such as smp_tier remained empty. Apply every supplied mode tier and do
+          // not let the last mode in object order overwrite current_tier.
+          for (const [field, tier] of Object.entries(player)) {
+            if (!field.endsWith("Tier") || field === "currentTier" || field === "peakTier" || !tier) continue;
+            await updateModeTier(env, player.guildId, player.userId, field.slice(0, -4), tier, { updateCurrentTier: false });
+          }
+          inserted++;
         }
-        inserted++;
       }
+      return json({ ok: true, inserted });
     }
-    return json({ ok: true, inserted });
-  }
 
-  if (request.method === "POST" && parts[0] === "webhook") {
+    if (request.method === "POST" && parts[0] === "webhook") {
     const body = await request.json().catch(() => ({}));
     if (!authorized(request, body, env)) return json({ error: "Unauthorized" }, 401);
 
