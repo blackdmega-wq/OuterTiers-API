@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, playersTable } from "../lib/db.js";
+import { db, playersTable, playerNameHistoryTable } from "../lib/db.js";
 
 const router = Router();
 const MC_NAME_RE = /^[a-zA-Z0-9_]{3,16}$/;
@@ -98,6 +98,15 @@ router.post("/migrate", async (req, res) => {
           target: [playersTable.guildId, playersTable.userId],
           set: update,
         });
+        await db.insert(playerNameHistoryTable)
+          .values({
+            guildId: String(p.guildId),
+            userId: String(p.userId),
+            uuid,
+            username,
+            observedAt: now,
+          })
+          .onConflictDoNothing();
 
       inserted++;
     }
