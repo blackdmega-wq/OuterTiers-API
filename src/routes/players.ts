@@ -28,16 +28,18 @@ const TIER_POINTS: Record<string, number> = {
 };
 
 function rawTierToPointsKey(tier: string | null | undefined): string {
-  if (!tier) return "-";
-  // Retired tiers are stored with an R prefix (for example RHT5).
-  const normalized = tier.toUpperCase().replace(/^R/, "");
-  const num = normalized.replace(/[^0-9]/g, "");
-  if (!num) return "-";
-  const prefix = normalized.includes("HT") ? "HT" : normalized.includes("LT") ? "LT" : "";
-  return prefix ? prefix + num : "T" + num;
-}
+    if (!tier) return "-";
+    // Retired and legacy labels can be stored as RHT5, HT5, High Tier 5, or Low Tier 3.
+    const normalized = tier.toUpperCase().trim().replace(/^R(?=(?:HT|LT|HIGH|LOW))/, "");
+    const legacyMatch = normalized.match(/^(HIGH|LOW)(?:\s+TIER)?\s*(\d+)$/);
+    if (legacyMatch) return (legacyMatch[1] === "HIGH" ? "HT" : "LT") + legacyMatch[2];
+    const compactMatch = normalized.match(/^(HT|LT)(?:\s+TIER)?\s*(\d+)$/);
+    if (compactMatch) return compactMatch[1] + compactMatch[2];
+    const num = normalized.replace(/[^0-9]/g, "");
+    return num ? "T" + num : "-";
+    }
 
-function calculatePoints(p: DbPlayer): number {
+    function calculatePoints(p: DbPlayer): number {
   return [p.ogvanillaTier, p.vanillaTier, p.uhcTier, p.potTier, p.nethopTier,
           p.smpTier, p.swordTier, p.axeTier, p.maceTier, p.speedTier,
            p.spearMaceTier, p.minecartTier, p.diamondSmpTier]
