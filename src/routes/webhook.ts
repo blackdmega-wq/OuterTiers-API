@@ -338,12 +338,33 @@ router.post("/webhook/tier", async (req, res) => {
     if (duplicate.length > 0) {
       // A previous request may have inserted the history row before a
       // deploy/retry failed to mirror the mode column. Re-apply the
-      // denormalized player fields before acknowledging the duplicate.
-      await db.update(playersTable).set({
-        currentTier: upperTier,
-        updatedAt: now,
-        ...modeUpdate,
-      }).where(where);
+      // denormalized player fields before acknowledging the duplicate. Older
+      // deployments could insert tier_results first and leave no player row;
+      // in that case a 200 without an upsert made the website permanently
+      // miss the player even though the Result was already stored.
+      const duplicatePlayers = await db.select().from(playersTable).where(where).limit(1);
+      const duplicateUsername = username && MC_NAME_RE.test(username.trim()) ? username.trim() : null;
+      if (duplicatePlayers.length > 0) {
+        await db.update(playersTable).set({
+          currentTier: upperTier,
+          updatedAt: now,
+          ...modeUpdate,
+        }).where(where);
+      } else if (duplicateUsername) {
+        await db.insert(playersTable).values({
+          guildId,
+          userId,
+          username: duplicateUsername,
+          discordUsername: discordUsername || null,
+          uuid: validIncomingUuid,
+          region: region || null,
+          currentTier: upperTier,
+          updatedAt: eventTimestamp,
+          ...modeUpdate,
+        });
+      } else {
+        return res.status(422).json({ error: "A verified Minecraft username is required to repair this Result" });
+      }
       return res.json({ ok: true, duplicate: true, repaired: true });
     }
 
