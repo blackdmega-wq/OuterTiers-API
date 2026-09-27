@@ -134,8 +134,10 @@ router.get("/players/by-discord/:userId", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const { userId } = req.params;
   try {
-    const rows = await db.select().from(playersTable);
-    const matches = rows.filter(p => discordIdsForPlayer(p).includes(userId) && hasPublishableMinecraftName(p));
+    const rows = await db.select().from(playersTable).where(sql`
+      ${playersTable.userId} = ${userId} OR ${userId} = ANY(${playersTable.discordUserIds})
+    `);
+    const matches = rows.filter(hasPublishableMinecraftName);
     if (matches.length === 0) return res.status(404).json({ error: "Player not found" });
     // When a user appears under multiple guild IDs, pick the row with the most tier data,
     // falling back to the most recently updated row.
