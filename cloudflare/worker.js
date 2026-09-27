@@ -141,10 +141,17 @@ async function ensureSchema(env) {
         )
       `);
       await run(env, "CREATE UNIQUE INDEX IF NOT EXISTS player_name_history_identity ON player_name_history(guild_id, user_id, lower(username))").catch(() => {});
-      const existingPlayers = await all(env, "SELECT guild_id, user_id, uuid, username, updated_at FROM players");
-      for (const player of existingPlayers) {
-        await recordPlayerName(env, player.guild_id, player.user_id, player.username, player.uuid, Number(player.updated_at) || Date.now());
-      }
+      // Keep cold starts bounded: the old implementation selected every player and
+      // inserted name-history rows one request at a time before serving any API
+      // response. On a populated D1 database that made the first request time out.
+      await run(env, "CREATE INDEX IF NOT EXISTS players_user_id_idx ON players(user_id)").catch(() => {});
+      await run(env, "CREATE INDEX IF NOT EXISTS player_name_history_user_id_idx ON player_name_history(user_id)").catch(() => {});
+      await run(env, [
+        "INSERT OR IGNORE INTO player_name_history (guild_id, user_id, uuid, username, observed_at)",
+        "SELECT guild_id, user_id, uuid, username, updated_at FROM players",
+        "WHERE length(trim(username)) BETWEEN 3 AND 16",
+        "  AND trim(username) NOT GLOB '*[^A-Za-z0-9_]*'",
+      ].join('\n')).catch(() => {});
     })().catch((error) => {
       schemaPromise = null;
       throw error;
