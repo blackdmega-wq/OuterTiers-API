@@ -370,7 +370,6 @@ async function handlePlayers(env, parts) {
 }
 
 async function handleRequest(request, env) {
-  await ensureSchema(env);
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -389,6 +388,16 @@ async function handleRequest(request, env) {
   const apiPath = path.startsWith("/api/") ? path.slice(5) : path === "/api" ? "" : null;
   if (apiPath === null) return json({ error: "Not found" }, 404);
   const parts = apiPath.split("/").filter(Boolean);
+
+  // The public player list only reads the already-existing players table. Do
+  // not block it on cold-start D1 schema maintenance: the old behavior waited
+  // for several ALTER/INDEX/INSERT statements on every fresh isolate, which
+  // made cache-busting browser requests time out with an empty leaderboard.
+  const isPublicPlayerList =
+    request.method === "GET" &&
+    parts.length === 1 &&
+    parts[0] === "players";
+  if (!isPublicPlayerList) await ensureSchema(env);
 
   if (request.method === "GET" && parts[0] === "healthz") {
     return json({ status: "ok", v: 6, timestamp: Date.now() });
