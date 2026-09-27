@@ -96,6 +96,8 @@ async function ensureSchema() {
     CREATE UNIQUE INDEX IF NOT EXISTS player_name_history_identity
       ON player_name_history (guild_id, user_id, lower(username))
   `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS players_user_id_idx ON players(user_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS player_name_history_user_id_idx ON player_name_history(user_id)`);
   await pool.query(`
     INSERT INTO player_name_history (guild_id, user_id, uuid, username, observed_at)
     SELECT guild_id, user_id, uuid, username, updated_at
@@ -107,6 +109,7 @@ async function ensureSchema() {
         AND h.user_id = p.user_id
         AND lower(h.username) = lower(p.username)
     )
+    ON CONFLICT DO NOTHING
   `);
   await pool.query(`
     UPDATE players
