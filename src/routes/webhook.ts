@@ -293,7 +293,15 @@ router.post("/webhook/tier", async (req, res) => {
       ))
       .limit(1);
     if (duplicate.length > 0) {
-      return res.json({ ok: true, duplicate: true });
+      // A previous request may have inserted the history row before a
+      // deploy/retry failed to mirror the mode column. Re-apply the
+      // denormalized player fields before acknowledging the duplicate.
+      await db.update(playersTable).set({
+        currentTier: upperTier,
+        updatedAt: now,
+        ...modeUpdate,
+      }).where(where);
+      return res.json({ ok: true, duplicate: true, repaired: true });
     }
 
     const existingRows = await db.select().from(playersTable).where(where).limit(1);
