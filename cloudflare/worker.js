@@ -205,11 +205,11 @@ async function updateModeTier(env, guildId, userId, mode, tier, options = {}) {
     if (!column) return;
     const now = Date.now();
     if (options.updateCurrentTier === false) {
-      await run(`UPDATE players SET ${column} = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?`,
+      await run(env, `UPDATE players SET ${column} = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?`,
         tier, now, guildId, userId);
       return;
     }
-    await run(`UPDATE players SET ${column} = ?, current_tier = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?`,
+    await run(env, `UPDATE players SET ${column} = ?, current_tier = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?`,
       tier, tier, now, guildId, userId);
     }
 
