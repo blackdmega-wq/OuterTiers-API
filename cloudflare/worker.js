@@ -238,6 +238,7 @@ async function insertResult(env, result) {
     guildId,
     userId,
     username,
+    uuid = null,
     tier,
     mode = null,
     region = null,
@@ -293,6 +294,7 @@ async function insertResult(env, result) {
     guildId,
     userId,
     username: storedUsername,
+    uuid,
     region,
     currentTier: tier,
   });

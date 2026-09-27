@@ -439,7 +439,7 @@ router.post("/webhook/bulk-results", async (req, res) => {
   const sorted = [...results].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 
   for (const r of sorted) {
-    const { guildId, userId, username, tier, mode, region, ticketType, testerId, testerName, createdAt } = r;
+    const { guildId, userId, username, uuid, tier, mode, region, ticketType, testerId, testerName, createdAt } = r;
     if (!guildId || !userId || !tier) { skipped++; continue; }
 
     const upperTier = normalizeTier(tier);
@@ -523,12 +523,13 @@ router.post("/webhook/bulk-results", async (req, res) => {
         // Since results are sorted ascending by createdAt, the last processed row
         // has the newest ts, so currentTier will correctly end up as the latest value.
         await db.update(playersTable)
-          .set({ username: resolvedUsername, currentTier: upperTier, updatedAt: ts, ...modeUpdate })
+          .set({ username: resolvedUsername, uuid: uuid ?? undefined, currentTier: upperTier, updatedAt: ts, ...modeUpdate })
           .where(playerWhere);
       } else {
         await db.insert(playersTable).values({
           guildId, userId,
           username: resolvedUsername,
+          uuid: uuid ?? null,
           discordUsername: null,
           region: region ?? null,
           currentTier: upperTier,
