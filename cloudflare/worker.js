@@ -480,6 +480,9 @@ async function handleRequest(request, env) {
         const normalizedUuid = body.uuid
           ? String(body.uuid).replace(/-/g, "").toLowerCase()
           : null;
+        if (body.uuid && (!normalizedUuid || !/^[0-9a-f]{32}$/.test(normalizedUuid))) {
+          return json({ error: "A valid Minecraft UUID is required" }, 422);
+        }
         const existing = await first(env,
           "SELECT * FROM players WHERE guild_id = ? AND user_id = ? LIMIT 1",
           body.guildId, body.userId);
@@ -493,7 +496,7 @@ async function handleRequest(request, env) {
         }
         if (!target) return json({ error: "Player not found" }, 404);
         const storedUuid = target.uuid ? String(target.uuid).replace(/-/g, "").toLowerCase() : null;
-        if (storedUuid && normalizedUuid && storedUuid !== normalizedUuid) {
+        if (storedUuid && normalizedUuid && storedUuid !== normalizedUuid && body.forceIdentityUpdate !== true) {
           return json({ error: "Minecraft UUID does not match the stored player identity" }, 409);
         }
         await recordPlayerName(env, target.guild_id, target.user_id, target.username, storedUuid, Date.now());
@@ -508,7 +511,13 @@ async function handleRequest(request, env) {
             username, body.guildId, historyUserId);
           await recordPlayerName(env, body.guildId, historyUserId, username, normalizedUuid || storedUuid, Date.now());
         }
-        return json({ ok: true });
+        const updated = await first(env, "SELECT username, uuid FROM players WHERE id = ? LIMIT 1", target.id);
+        return json({
+          ok: true,
+          updated: updated ? 1 : 0,
+          username: updated?.username || username,
+          uuid: updated?.uuid || normalizedUuid || storedUuid || null,
+        });
       }
 
       // tierwipe must clear the requested player column, not perform a normal upsert.
