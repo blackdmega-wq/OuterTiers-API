@@ -107,7 +107,8 @@ async function recordPlayerName(
 
 router.post("/webhook/tier", async (req, res) => {
   const { secret, type, guildId, userId, username, discordUsername, uuid,
-          tier, peakTier, mode, region, testerId, testerName, ticketType, scope, createdAt }
+          tier, peakTier, mode, region, testerId, testerName, ticketType, scope,
+          createdAt, forceIdentityUpdate }
     = req.body as Record<string, any>;
   const normalizedMode = normalizeMode(mode);
   const incomingUuid = uuid ? String(uuid).replace(/-/g, '').toLowerCase() : null;
@@ -218,6 +219,9 @@ router.post("/webhook/tier", async (req, res) => {
       const normalizedUuid = uuid
         ? String(uuid).replace(/-/g, "").toLowerCase()
         : null;
+      if (uuid && (!normalizedUuid || !/^[0-9a-f]{32}$/.test(normalizedUuid))) {
+        return res.status(422).json({ error: "A valid Minecraft UUID is required" });
+      }
       const existing = await db
         .select({
           id: playersTable.id,
@@ -274,7 +278,7 @@ router.post("/webhook/tier", async (req, res) => {
       const existingUuid = target.uuid
         ? String(target.uuid).replace(/-/g, '').toLowerCase()
         : null;
-      if (existingUuid && normalizedUuid && existingUuid !== normalizedUuid) {
+      if (existingUuid && normalizedUuid && existingUuid !== normalizedUuid && forceIdentityUpdate !== true) {
         return res.status(409).json({ error: "Minecraft UUID does not match the stored player identity" });
       }
       await recordPlayerName(guildId, target.userId, target.username, target.uuid, now);
@@ -300,7 +304,17 @@ router.post("/webhook/tier", async (req, res) => {
         );
         await recordPlayerName(guildId, historyUserId, verifiedUsername, normalizedUuid || existingUuid, now);
       }
-      return res.json({ ok: true });
+      const updateResult = await db
+        .select({ username: playersTable.username, uuid: playersTable.uuid })
+        .from(playersTable)
+        .where(playerWhere)
+        .limit(1);
+      return res.json({
+        ok: true,
+        updated: updateResult.length > 0 ? 1 : 0,
+        username: updateResult[0]?.username ?? verifiedUsername,
+        uuid: updateResult[0]?.uuid ?? normalizedUuid ?? existingUuid ?? null,
+      });
     }
 
     // ── Un-retire: restore an active tier from a retired marker ──────────────
