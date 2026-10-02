@@ -562,6 +562,166 @@ router.post("/webhook/bulk-results", async (req, res) => {
   return res.json({ ok: true, inserted, skipped });
 });
 
+// ── Atomic tier reconciliation (used by /reconciletiers) ──────────────────────
+// One bounded request updates the player's mode columns and backfills missing
+// history rows together, instead of repeating per-row writes and player upserts.
+router.post("/webhook/reconcile-tiers", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+
+  const { results } = req.body as { results?: any[] };
+  const maxResults = 13;
+  if (!Array.isArray(results) || results.length === 0 || results.length > maxResults)
+    return res.status(400).json({ error: `results must contain between 1 and ${maxResults} modes` });
+
+  const normalized: Array<{
+    guildId: string;
+    userId: string;
+    username: string;
+    uuid: string | null;
+    region: string | null;
+    discordUsername: string | null;
+    tier: string;
+    mode: string;
+    ticketType: string;
+    testerId: string | null;
+    testerName: string | null;
+    createdAt: number;
+  }> = [];
+  const seenModes = new Set<string>();
+
+  for (const result of results) {
+    const guildId = String(result?.guildId || "").trim();
+    const userId = String(result?.userId || "").trim();
+    const username = String(result?.username || "").trim();
+    const tier = normalizeTier(result?.tier);
+    const mode = normalizeMode(result?.mode);
+    const rawUuid = String(result?.uuid || "").replace(/-/g, "").toLowerCase();
+    if (!guildId || !userId || !MC_NAME_RE.test(username) || !tier || !mode)
+      return res.status(422).json({ error: "Each reconciliation result requires a valid player, username, mode and tier" });
+    if (rawUuid && !/^[0-9a-f]{32}$/.test(rawUuid))
+      return res.status(422).json({ error: "A valid Minecraft UUID is required" });
+    if (seenModes.has(mode))
+      return res.status(400).json({ error: "Only one latest result per mode is allowed" });
+    seenModes.add(mode);
+
+    const timestamp = Number(result.createdAt);
+    normalized.push({
+      guildId,
+      userId,
+      username,
+      uuid: rawUuid || null,
+      region: result.region ? String(result.region) : null,
+      discordUsername: result.discordUsername ? String(result.discordUsername) : null,
+      tier,
+      mode,
+      ticketType: result.ticketType ? String(result.ticketType) : "reconcile",
+      testerId: result.testerId ? String(result.testerId) : null,
+      testerName: result.testerName ? String(result.testerName) : null,
+      createdAt: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now(),
+    });
+  }
+
+  const player = normalized[0];
+  if (normalized.some((result) => result.guildId !== player.guildId || result.userId !== player.userId))
+    return res.status(400).json({ error: "A reconciliation batch must contain one player" });
+
+  const WINDOW = 10_000;
+  try {
+    const existingRows = await Promise.all(normalized.map(async (result) => {
+      const rows = await db
+        .select({ id: tierResultsTable.id, username: tierResultsTable.username })
+        .from(tierResultsTable)
+        .where(and(
+          eq(tierResultsTable.guildId, result.guildId),
+          eq(tierResultsTable.userId, result.userId),
+          eq(tierResultsTable.tier, result.tier),
+          eq(tierResultsTable.mode, result.mode),
+          between(tierResultsTable.createdAt, result.createdAt - WINDOW, result.createdAt + WINDOW),
+        ))
+        .limit(1);
+      return rows[0] || null;
+    }));
+
+    const missingHistory = normalized.filter((_, index) => !existingRows[index]);
+    const modeUpdate = normalized.reduce(
+      (updates, result) => ({ ...updates, ...buildModeUpdate(result.mode, result.tier) }),
+      {} as Partial<typeof playersTable.$inferInsert>,
+    );
+    const latest = normalized.reduce((newest, result) =>
+      result.createdAt > newest.createdAt ? result : newest,
+    );
+    const now = Date.now();
+
+    await db.transaction(async (tx) => {
+      for (let index = 0; index < normalized.length; index++) {
+        const existing = existingRows[index];
+        if (existing && existing.username !== player.username) {
+          await tx.update(tierResultsTable)
+            .set({ username: player.username })
+            .where(eq(tierResultsTable.id, existing.id));
+        }
+      }
+
+      if (missingHistory.length > 0) {
+        await tx.insert(tierResultsTable).values(missingHistory.map((result) => ({
+          guildId: result.guildId,
+          userId: result.userId,
+          username: result.username,
+          testerId: result.testerId,
+          testerName: result.testerName,
+          tier: result.tier,
+          mode: result.mode,
+          region: result.region,
+          ticketType: result.ticketType,
+          isHighTier: HIGH_TIERS.has(result.tier),
+          createdAt: result.createdAt,
+        })));
+      }
+
+      await tx.insert(playersTable).values({
+        guildId: player.guildId,
+        userId: player.userId,
+        username: player.username,
+        discordUsername: player.discordUsername,
+        uuid: player.uuid,
+        region: player.region,
+        currentTier: latest.tier,
+        updatedAt: now,
+        ...modeUpdate,
+      }).onConflictDoUpdate({
+        target: [playersTable.guildId, playersTable.userId],
+        set: {
+          username: player.username,
+          discordUsername: player.discordUsername ?? undefined,
+          uuid: player.uuid ?? undefined,
+          region: player.region ?? undefined,
+          currentTier: latest.tier,
+          updatedAt: now,
+          ...modeUpdate,
+        },
+      });
+
+      await tx.insert(playerNameHistoryTable).values({
+        guildId: player.guildId,
+        userId: player.userId,
+        uuid: player.uuid,
+        username: player.username,
+        observedAt: now,
+      }).onConflictDoNothing();
+    });
+
+    return res.json({
+      ok: true,
+      updated: normalized.length,
+      inserted: missingHistory.length,
+      skipped: normalized.length - missingHistory.length,
+    });
+  } catch (err) {
+    console.error("[/api/webhook/reconcile-tiers] transaction error:", (err as Error).message);
+    return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
+  }
+});
+
 // ── Single punishment (posted in real-time when a punishment is applied) ──────
 
 router.post("/webhook/punishment", async (req, res) => {

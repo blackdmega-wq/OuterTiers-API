@@ -233,6 +233,142 @@ async function repairModeTierFromHistory(env, guildId, userId, mode) {
   return true;
 }
 
+async function reconcileTierResults(env, results) {
+  const maxResults = Object.keys(MODE_COLUMNS).length;
+  if (!Array.isArray(results) || results.length === 0 || results.length > maxResults) {
+    return { ok: false, status: 400, error: `results must contain between 1 and ${maxResults} modes` };
+  }
+
+  const normalized = [];
+  const seenModes = new Set();
+  for (const result of results) {
+    const guildId = String(result?.guildId || "").trim();
+    const userId = String(result?.userId || "").trim();
+    const username = String(result?.username || "").trim();
+    const tier = normalizeTier(result?.tier);
+    const mode = normalizeMode(result?.mode);
+    const rawUuid = String(result?.uuid || "").replace(/-/g, "").toLowerCase();
+    if (!guildId || !userId || !/^[A-Za-z0-9_]{3,16}$/.test(username) || !tier || !mode) {
+      return { ok: false, status: 422, error: "Each reconciliation result requires a valid player, username, mode and tier" };
+    }
+    if (rawUuid && !/^[0-9a-f]{32}$/.test(rawUuid)) {
+      return { ok: false, status: 422, error: "A valid Minecraft UUID is required" };
+    }
+    if (seenModes.has(mode)) {
+      return { ok: false, status: 400, error: "Only one latest result per mode is allowed" };
+    }
+    seenModes.add(mode);
+
+    const createdAt = Number(result.createdAt);
+    normalized.push({
+      guildId,
+      userId,
+      username,
+      uuid: rawUuid || null,
+      region: result.region ? String(result.region) : null,
+      testerId: result.testerId ? String(result.testerId) : null,
+      testerName: result.testerName ? String(result.testerName) : null,
+      tier,
+      mode,
+      ticketType: result.ticketType ? String(result.ticketType) : "reconcile",
+      createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
+      sourceChannelId: result.sourceChannelId ? String(result.sourceChannelId) : null,
+      sourceMessageId: result.sourceMessageId ? String(result.sourceMessageId) : null,
+    });
+  }
+
+  const player = normalized[0];
+  if (normalized.some((result) => result.guildId !== player.guildId || result.userId !== player.userId)) {
+    return { ok: false, status: 400, error: "A reconciliation batch must contain one player" };
+  }
+
+  // Check all history rows in one D1 batch rather than issuing four sequential
+  // database calls per mode. The following write batch atomically updates the
+  // player mirror and inserts only history entries not already present.
+  const duplicateChecks = await env.DB.batch(normalized.map((result) => {
+    if (result.sourceMessageId) {
+      return env.DB.prepare(
+        "SELECT id FROM tier_results WHERE source_channel_id = ? AND source_message_id = ? LIMIT 1",
+      ).bind(result.sourceChannelId || "", result.sourceMessageId);
+    }
+    return env.DB.prepare(`
+      SELECT id FROM tier_results
+      WHERE guild_id = ? AND user_id = ?
+        AND COALESCE(mode, '') = ?
+        AND tier = ? AND ABS(created_at - ?) < 10000
+      LIMIT 1
+    `).bind(result.guildId, result.userId, result.mode, result.tier, result.createdAt);
+  }));
+  const missingHistory = normalized.filter((_, index) =>
+    !(duplicateChecks[index]?.results || []).length,
+  );
+
+  const modeColumns = [...new Set(normalized.map((result) => MODE_COLUMNS[result.mode]))];
+  const latest = normalized.reduce((newest, result) =>
+    result.createdAt > newest.createdAt ? result : newest,
+  );
+  const playerColumns = [
+    "guild_id", "user_id", "username", "uuid", "region", "current_tier", "updated_at",
+    ...modeColumns,
+  ];
+  const playerValues = [
+    player.guildId, player.userId, player.username, player.uuid, player.region,
+    latest.tier, Date.now(),
+    ...modeColumns.map((column) =>
+      normalized.find((result) => MODE_COLUMNS[result.mode] === column).tier,
+    ),
+  ];
+  const playerUpdates = [
+    "username = excluded.username",
+    "uuid = COALESCE(excluded.uuid, players.uuid)",
+    "region = COALESCE(excluded.region, players.region)",
+    "current_tier = COALESCE(excluded.current_tier, players.current_tier)",
+    ...modeColumns.map((column) => `${column} = excluded.${column}`),
+    "updated_at = excluded.updated_at",
+  ];
+
+  const writeStatements = [
+    env.DB.prepare(`
+      INSERT INTO players (${playerColumns.join(", ")})
+      VALUES (${playerColumns.map(() => "?").join(", ")})
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET ${playerUpdates.join(", ")}
+    `).bind(...playerValues),
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO player_name_history
+        (guild_id, user_id, uuid, username, observed_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(player.guildId, player.userId, player.uuid, player.username, Date.now()),
+    ...missingHistory.map((result) => env.DB.prepare(`
+      INSERT OR IGNORE INTO tier_results
+        (guild_id, user_id, username, tester_id, tester_name, tier, mode, region,
+         ticket_type, is_high_tier, created_at, source_channel_id, source_message_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      result.guildId,
+      result.userId,
+      result.username,
+      result.testerId,
+      result.testerName,
+      result.tier,
+      result.mode,
+      result.region,
+      result.ticketType,
+      HIGH_TIERS.has(result.tier) ? 1 : 0,
+      result.createdAt,
+      result.sourceChannelId,
+      result.sourceMessageId,
+    )),
+  ];
+
+  await env.DB.batch(writeStatements);
+  return {
+    ok: true,
+    updated: normalized.length,
+    inserted: missingHistory.length,
+    skipped: normalized.length - missingHistory.length,
+  };
+}
+
 async function insertResult(env, result) {
   const {
     guildId,
@@ -461,6 +597,11 @@ async function handleRequest(request, env) {
     if (request.method === "POST" && parts[0] === "webhook") {
     const body = await request.json().catch(() => ({}));
     if (!authorized(request, body, env)) return json({ error: "Unauthorized" }, 401);
+
+    if (parts[1] === "reconcile-tiers") {
+      const result = await reconcileTierResults(env, body.results);
+      return json(result.ok ? result : { error: result.error }, result.ok ? 200 : result.status);
+    }
 
     if (parts[1] === "bulk-results") {
       if (!Array.isArray(body.results) || body.results.length === 0) return json({ error: "results array required" }, 400);
