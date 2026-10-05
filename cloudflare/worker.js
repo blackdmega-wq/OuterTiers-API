@@ -141,17 +141,9 @@ async function ensureSchema(env) {
         )
       `);
       await run(env, "CREATE UNIQUE INDEX IF NOT EXISTS player_name_history_identity ON player_name_history(guild_id, user_id, lower(username))").catch(() => {});
-      // Keep cold starts bounded: the old implementation selected every player and
-      // inserted name-history rows one request at a time before serving any API
-      // response. On a populated D1 database that made the first request time out.
-      await run(env, "CREATE INDEX IF NOT EXISTS players_user_id_idx ON players(user_id)").catch(() => {});
-      await run(env, "CREATE INDEX IF NOT EXISTS player_name_history_user_id_idx ON player_name_history(user_id)").catch(() => {});
-      await run(env, [
-        "INSERT OR IGNORE INTO player_name_history (guild_id, user_id, uuid, username, observed_at)",
-        "SELECT guild_id, user_id, uuid, username, updated_at FROM players",
-        "WHERE length(trim(username)) BETWEEN 3 AND 16",
-        "  AND trim(username) NOT GLOB '*[^A-Za-z0-9_]*'",
-      ].join('\n')).catch(() => {});
+      // Historical rows are backfilled by the one-time SQL migration, not on a
+      // request. Building table-wide indexes and rescanning all players on each
+      // cold isolate can hold webhook writes past the bot's request deadline.
     })().catch((error) => {
       schemaPromise = null;
       throw error;

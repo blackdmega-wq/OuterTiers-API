@@ -16,6 +16,9 @@ class MockStatement {
 
   async run() {
     const sql = this.sql.replace(/\s+/g, " ").trim();
+    if (/INSERT OR IGNORE INTO player_name_history/i.test(sql) && /\bFROM players\b/i.test(sql)) {
+      this.db.historyBackfillScans++;
+    }
     if (/INSERT OR IGNORE INTO players \(guild_id, user_id, username, uuid, updated_at\)/i.test(sql)) {
       const [guildId, userId, username, uuid, updatedAt] = this.params;
       const existing = this.db.players.find(player =>
@@ -74,6 +77,7 @@ class MockD1 {
   constructor() {
     this.players = [];
     this.nextId = 1;
+    this.historyBackfillScans = 0;
   }
 
   prepare(sql) {
@@ -117,6 +121,7 @@ test("creates a minimal website player row when the verified identity is new", a
   assert.equal(DB.players.length, 1);
   assert.equal(DB.players[0].guild_id, "guild-1");
   assert.equal(DB.players[0].user_id, "player-1");
+  assert.equal(DB.historyBackfillScans, 0, "request path must not scan all players to backfill name history");
 });
 
 test("does not create a website player row when no valid UUID is available", async () => {
