@@ -234,12 +234,13 @@ router.post("/webhook/tier", async (req, res) => {
         .limit(1);
       let playerWhere = where;
       let historyUserIds = [userId];
+      let target = existing[0] ?? null;
 
       // A bot retry can arrive after a Discord account transfer, or before
       // the website has received its first tier row. Do not return 200 while
       // silently updating nothing: use the permanent UUID when possible and
-      // create the minimal player row as a last resort.
-      if (existing.length === 0 && normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid)) {
+      // create a minimal row only when a valid Minecraft UUID anchors identity.
+      if (!target && normalizedUuid && /^[0-9a-f]{32}$/.test(normalizedUuid)) {
         const byUuid = await db
           .select({
             id: playersTable.id,
@@ -251,24 +252,44 @@ router.post("/webhook/tier", async (req, res) => {
           .where(and(eq(playersTable.guildId, guildId), eq(playersTable.uuid, normalizedUuid)))
           .limit(1);
         if (byUuid.length > 0) {
+          target = byUuid[0];
           playerWhere = eq(playersTable.id, byUuid[0].id);
           historyUserIds = [...new Set([userId, byUuid[0].userId])];
         }
-      } else if (existing.length > 0) {
-        historyUserIds = [userId, existing[0].userId].filter(
-          (value, index, values) => values.indexOf(value) === index,
-        );
       }
 
-      const target = existing[0] ?? (
-        playerWhere !== where
-          ? await db.select({
+      if (!target && normalizedUuid) {
+        const inserted = await db.insert(playersTable).values({
+          guildId,
+          userId,
+          discordUserIds: [userId],
+          username: verifiedUsername,
+          uuid: normalizedUuid,
+          updatedAt: now,
+        }).onConflictDoNothing().returning({
+          id: playersTable.id,
+          userId: playersTable.userId,
+          username: playersTable.username,
+          uuid: playersTable.uuid,
+        });
+        target = inserted[0] ?? null;
+        if (target) {
+          playerWhere = eq(playersTable.id, target.id);
+        } else {
+          // A concurrent request may have created the same Discord identity.
+          const raced = await db
+            .select({
+              id: playersTable.id,
+              userId: playersTable.userId,
               username: playersTable.username,
               uuid: playersTable.uuid,
-              userId: playersTable.userId,
-            }).from(playersTable).where(playerWhere).limit(1).then(rows => rows[0])
-          : undefined
-      );
+            })
+            .from(playersTable)
+            .where(where)
+            .limit(1);
+          target = raced[0] ?? null;
+        }
+      }
       if (!target) {
         return res.status(404).json({ error: "Player not found" });
       }
@@ -291,10 +312,7 @@ router.post("/webhook/tier", async (req, res) => {
         playerUpdate.uuid = normalizedUuid;
       }
       await db.update(playersTable).set(playerUpdate).where(playerWhere);
-      // Do not create a bare player row from an identity-sync callback.
-      // A row without verified tier history becomes a ghost identity and can
-      // collide with the real player during username deduplication.
-      // History is keyed by Discord userId; update denormalized names after MC renames.
+      // Keep historical names attached to both sides of an account transfer.
       for (const historyUserId of historyUserIds) {
         await db.update(tierResultsTable).set({ username: verifiedUsername }).where(
           and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, historyUserId)),

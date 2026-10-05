@@ -635,6 +635,15 @@ async function handleRequest(request, env) {
             body.guildId, normalizedUuid);
           if (target) historyUserIds = [...new Set([String(body.userId), String(target.user_id)])];
         }
+        if (!target && normalizedUuid) {
+          await run(env, `
+            INSERT OR IGNORE INTO players (guild_id, user_id, username, uuid, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+          `, body.guildId, body.userId, username, normalizedUuid, Date.now());
+          target = await first(env,
+            "SELECT * FROM players WHERE guild_id = ? AND user_id = ? LIMIT 1",
+            body.guildId, body.userId);
+        }
         if (!target) return json({ error: "Player not found" }, 404);
         const storedUuid = target.uuid ? String(target.uuid).replace(/-/g, "").toLowerCase() : null;
         if (storedUuid && normalizedUuid && storedUuid !== normalizedUuid && body.forceIdentityUpdate !== true) {
