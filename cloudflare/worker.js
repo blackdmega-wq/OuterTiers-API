@@ -80,6 +80,43 @@ function buildPlayer(player) {
   };
 }
 
+async function buildTierDates(env, player) {
+  const rows = await all(env,
+    "SELECT mode, tier, created_at FROM tier_results WHERE user_id = ? AND mode IS NOT NULL ORDER BY created_at DESC, id DESC",
+    player.user_id);
+  const historyByMode = new Map();
+
+  for (const row of rows) {
+    const mode = normalizeMode(row.mode);
+    const tier = normalizeTier(row.tier);
+    const createdAt = Number(row.created_at);
+    if (!mode || !tier || !Number.isFinite(createdAt) || createdAt <= 0) continue;
+
+    if (!historyByMode.has(mode)) historyByMode.set(mode, []);
+    historyByMode.get(mode).push({ tier, createdAt });
+  }
+
+  const tierDates = {};
+  for (const [mode, column] of Object.entries(MODE_COLUMNS)) {
+    const currentTier = normalizeTier(player[column]);
+    const history = historyByMode.get(mode);
+    if (!currentTier || !history?.length) continue;
+
+    // Match the Express API's semantics: walk newest-first through the
+    // uninterrupted streak for the current tier, then return its oldest test.
+    let streakStartMs = null;
+    for (const result of history) {
+      if (result.tier !== currentTier) break;
+      streakStartMs = result.createdAt;
+    }
+    if (streakStartMs !== null) {
+      tierDates[mode] = Math.floor(streakStartMs / 1000);
+    }
+  }
+
+  return tierDates;
+}
+
 function normalizeTier(value) {
   const key = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   const match = key.match(/^(R?)(HIGH(?:TIER)?|HT|LOW(?:TIER)?|LT)([1-5])$/);
@@ -486,11 +523,15 @@ async function handlePlayers(env, parts) {
   const username = decodeURIComponent(parts[1] || "");
   const row = await first(env, "SELECT * FROM players WHERE lower(username) = lower(?) ORDER BY updated_at DESC LIMIT 1", username);
   if (!row) return json({ error: "Player not found" }, 404);
-  const nameHistory = await all(env,
-    "SELECT username, uuid, observed_at FROM player_name_history WHERE user_id = ? ORDER BY observed_at DESC, id DESC",
-    row.user_id);
+  const [nameHistory, tierDates] = await Promise.all([
+    all(env,
+      "SELECT username, uuid, observed_at FROM player_name_history WHERE user_id = ? ORDER BY observed_at DESC, id DESC",
+      row.user_id),
+    buildTierDates(env, row),
+  ]);
   return json({
     ...buildPlayer(row),
+    tierDates,
     nameHistory: nameHistory.map((entry) => ({
       username: entry.username,
       uuid: entry.uuid || null,
