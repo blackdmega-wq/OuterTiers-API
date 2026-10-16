@@ -17,6 +17,73 @@ const MODE_COLUMNS = {
 };
 
 let schemaPromise;
+const pendingPublicCacheFills = new Map();
+
+function publicCacheTtl(request) {
+  if (request.method !== "GET") return 0;
+  const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
+  if (path === "/api/players") return 300;
+  if (path === "/api/results/live" || path === "/api/results/high-tier") return 60;
+  return 0;
+}
+
+function canonicalCacheKey(request) {
+  const url = new URL(request.url);
+  // These public routes do not use query parameters. In particular, ignoring
+  // legacy ?refresh=<timestamp> values keeps old clients on the same cache key.
+  url.search = "";
+  return new Request(url.toString(), { method: "GET" });
+}
+
+async function handleWithPublicCache(request, env) {
+  const ttlSeconds = publicCacheTtl(request);
+  const edgeCache = globalThis.caches?.default;
+  if (!ttlSeconds || !edgeCache) return handleRequest(request, env);
+
+  const cacheKey = canonicalCacheKey(request);
+  const cacheId = cacheKey.url;
+  try {
+    const cached = await edgeCache.match(cacheKey);
+    if (cached) return cached;
+  } catch (error) {
+    console.warn("[outertiers-api] public cache read failed", error?.message || error);
+  }
+
+  const pending = pendingPublicCacheFills.get(cacheId);
+  if (pending) return (await pending).clone();
+
+  const fill = (async () => {
+    const response = await handleRequest(request, env);
+    if (response.status !== 200) return response;
+
+    const headers = new Headers(response.headers);
+    headers.set(
+      "cache-control",
+      `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`,
+    );
+    const cacheable = new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+
+    try {
+      await edgeCache.put(cacheKey, cacheable.clone());
+    } catch (error) {
+      console.warn("[outertiers-api] public cache write failed", error?.message || error);
+    }
+    return cacheable;
+  })();
+
+  pendingPublicCacheFills.set(cacheId, fill);
+  try {
+    return await fill;
+  } finally {
+    if (pendingPublicCacheFills.get(cacheId) === fill) {
+      pendingPublicCacheFills.delete(cacheId);
+    }
+  }
+}
 
 function json(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
@@ -479,7 +546,7 @@ async function handlePlayers(env, parts) {
         return true;
       })
       .map(buildPlayer);
-    return json({ players }, 200, { "cache-control": "no-store" });
+    return json({ players }, 200, { "cache-control": "public, max-age=300" });
   }
 
   if (parts.length === 3 && parts[2] === "history") {
@@ -584,12 +651,12 @@ async function handleRequest(request, env) {
 
   if (request.method === "GET" && parts[0] === "results" && parts[1] === "live") {
     const rows = await all(env, "SELECT * FROM tier_results ORDER BY created_at DESC, id DESC LIMIT 30");
-    return json({ results: rows.map(buildResult) }, 200, { "cache-control": "public, max-age=30" });
+    return json({ results: rows.map(buildResult) }, 200, { "cache-control": "public, max-age=60" });
   }
 
   if (request.method === "GET" && parts[0] === "results" && parts[1] === "high-tier") {
     const rows = await all(env, "SELECT * FROM tier_results WHERE is_high_tier = 1 ORDER BY created_at DESC, id DESC LIMIT 30");
-    return json({ results: rows.map(buildResult) }, 200, { "cache-control": "public, max-age=30" });
+    return json({ results: rows.map(buildResult) }, 200, { "cache-control": "public, max-age=60" });
   }
 
   if (request.method === "GET" && parts[0] === "presence") {
@@ -828,7 +895,7 @@ async function handleRequest(request, env) {
 export default {
   async fetch(request, env) {
     try {
-      return await handleRequest(request, env);
+      return await handleWithPublicCache(request, env);
     } catch (error) {
       console.error("[outertiers-api]", error?.stack || error);
       return json({ error: "Internal Server Error", detail: error?.message || String(error) }, 500);

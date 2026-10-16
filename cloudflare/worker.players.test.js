@@ -50,6 +50,10 @@ class MockStatement {
   }
 
   async all() {
+    if (/SELECT \* FROM players ORDER BY updated_at DESC, id DESC/i.test(this.sql)) {
+      this.db.playerListReads++;
+      return { results: this.db.players };
+    }
     if (/SELECT \* FROM players WHERE lower\(username\)/i.test(this.sql)) {
       return { results: [this.db.player] };
     }
@@ -63,6 +67,8 @@ class MockStatement {
 class MockD1 {
   constructor(playerData, historyRows) {
     this.player = playerData;
+    this.players = playerData ? [playerData] : [];
+    this.playerListReads = 0;
     this.history = historyRows;
   }
 
@@ -95,4 +101,48 @@ test("player response does not invent a date when history does not match the cur
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.deepEqual(body.tierDates, {});
+});
+
+test("player list cache reuses entries despite legacy refresh parameters", async () => {
+  const cacheEntries = new Map();
+  const cache = {
+    async match(request) {
+      return cacheEntries.get(request.url)?.clone();
+    },
+    async put(request, response) {
+      cacheEntries.set(request.url, response.clone());
+    },
+  };
+  const originalCaches = Object.getOwnPropertyDescriptor(globalThis, "caches");
+  Object.defineProperty(globalThis, "caches", {
+    configurable: true,
+    writable: true,
+    value: { default: cache },
+  });
+
+  try {
+    const DB = new MockD1(player, []);
+    const env = { DB };
+    const first = await worker.fetch(
+      new Request("https://cache-test.example/api/players?refresh=first"),
+      env,
+    );
+    const firstBody = await first.json();
+    const second = await worker.fetch(
+      new Request("https://cache-test.example/api/players?refresh=second"),
+      env,
+    );
+
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.match(first.headers.get("cache-control"), /max-age=300/);
+    assert.deepEqual(await second.json(), firstBody);
+    assert.equal(DB.playerListReads, 1, "the second request must not read D1 again");
+  } finally {
+    if (originalCaches) {
+      Object.defineProperty(globalThis, "caches", originalCaches);
+    } else {
+      delete globalThis.caches;
+    }
+  }
 });
