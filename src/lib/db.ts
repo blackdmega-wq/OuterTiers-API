@@ -6,7 +6,7 @@ setDefaultResultOrder("ipv4first");
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import pg from "pg";
-import { pgTable, serial, text, bigint, boolean, unique } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, bigint, boolean, integer, unique } from "drizzle-orm/pg-core";
 
 const { Pool } = pg;
 
@@ -88,6 +88,7 @@ export const punishmentsTable = pgTable("punishments", {
   moderatorId: text("moderator_id"),
   moderatorName: text("moderator_name"),
   createdAt: bigint("created_at", { mode: "number" }).notNull().$defaultFn(() => Date.now()),
+  sourcePunishmentId: integer("source_punishment_id"),
 });
 
 export type DbPlayer = typeof playersTable.$inferSelect;

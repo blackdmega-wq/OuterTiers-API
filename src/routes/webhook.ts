@@ -944,10 +944,56 @@ router.post("/webhook/fix-result-modes", async (req, res) => {
 // ── Discord account transfer (migrate tiers + history from old Discord ID to new one) ─
 // Called when a player loses their Discord account and verifies on a new one.
 // The admin runs /transferaccount @OldDiscord @NewDiscord to trigger this.
+router.post("/webhook/account-transfer/preflight", async (req, res) => {
+  if (!requireSecret(req, res)) return;
+
+  const { guildId, oldUserId, newUserId, expectedUuid } = req.body as Record<string, string | undefined>;
+  if (!guildId || !oldUserId || !newUserId)
+    return res.status(400).json({ ok: false, error: "Missing required fields: guildId, oldUserId, newUserId" });
+  if (oldUserId === newUserId)
+    return res.status(400).json({ ok: false, error: "oldUserId and newUserId must be different" });
+
+  try {
+    const oldRows = await db.select({
+      username: playersTable.username,
+      uuid: playersTable.uuid,
+    }).from(playersTable).where(and(
+      eq(playersTable.guildId, guildId),
+      eq(playersTable.userId, oldUserId),
+    )).limit(1);
+    if (oldRows.length === 0)
+      return res.status(404).json({ ok: false, error: "Old player record not found in website database" });
+
+    const newRows = await db.select({ uuid: playersTable.uuid }).from(playersTable).where(and(
+      eq(playersTable.guildId, guildId),
+      eq(playersTable.userId, newUserId),
+    )).limit(1);
+    const normalizeUuid = (value: string | null | undefined) => {
+      const compact = String(value || "").replace(/-/g, "").trim().toLowerCase();
+      return /^[a-f0-9]{32}$/.test(compact) ? compact : null;
+    };
+    const oldUuid = normalizeUuid(oldRows[0].uuid);
+    const newUuid = normalizeUuid(newRows[0]?.uuid);
+    const requestedUuid = normalizeUuid(expectedUuid);
+    if ((oldUuid && newUuid && oldUuid !== newUuid)
+      || (requestedUuid && oldUuid && requestedUuid !== oldUuid)
+      || (requestedUuid && newUuid && requestedUuid !== newUuid)) {
+      return res.status(409).json({
+        ok: false,
+        error: "Old and new Discord accounts are linked to different Minecraft UUIDs",
+      });
+    }
+    return res.json({ ok: true, username: oldRows[0].username, uuid: oldRows[0].uuid });
+  } catch (err) {
+    console.error("[/api/webhook/account-transfer/preflight] DB error:", (err as Error).message);
+    return res.status(503).json({ ok: false, error: "Database temporarily unavailable. Please try again." });
+  }
+});
+
 router.post("/webhook/account-transfer", async (req, res) => {
   if (!requireSecret(req, res)) return;
 
-  const { guildId, oldUserId, newUserId } = req.body as Record<string, string | undefined>;
+  const { guildId, oldUserId, newUserId, expectedUuid } = req.body as Record<string, string | undefined>;
 
   if (!guildId || !oldUserId || !newUserId)
     return res.status(400).json({ error: "Missing required fields: guildId, oldUserId, newUserId" });
@@ -965,12 +1011,27 @@ router.post("/webhook/account-transfer", async (req, res) => {
       return res.status(404).json({ error: "Old player record not found in website database" });
 
     const old = oldRows[0];
+    const normalizeUuid = (value: string | null | undefined) => {
+      const compact = String(value || "").replace(/-/g, "").trim().toLowerCase();
+      return /^[a-f0-9]{32}$/.test(compact) ? compact : null;
+    };
+    const oldUuid = normalizeUuid(old.uuid);
+    const newRows = await db.select({ id: playersTable.id, uuid: playersTable.uuid }).from(playersTable).where(newWhere).limit(1);
+    const newUuid = normalizeUuid(newRows[0]?.uuid);
+    const requestedUuid = normalizeUuid(expectedUuid);
+    if ((oldUuid && newUuid && oldUuid !== newUuid)
+      || (requestedUuid && oldUuid && requestedUuid !== oldUuid)
+      || (requestedUuid && newUuid && requestedUuid !== newUuid)) {
+      return res.status(409).json({ error: "Old and new Discord accounts are linked to different Minecraft UUIDs" });
+    }
+    const transferUuid = requestedUuid || old.uuid || newRows[0]?.uuid || null;
 
     // 2. Upsert new player record with all of the old player's tier data
     const mergedRecord: typeof playersTable.$inferInsert = {
       guildId,
       userId:          newUserId,
       username:        old.username,
+      uuid:            transferUuid,
       discordUsername: old.discordUsername,
       region:          old.region,
       currentTier:     old.currentTier,
@@ -991,7 +1052,6 @@ router.post("/webhook/account-transfer", async (req, res) => {
       updatedAt:       now,
     };
 
-    const newRows = await db.select({ id: playersTable.id }).from(playersTable).where(newWhere).limit(1);
     if (newRows.length > 0) {
       await db.update(playersTable).set(mergedRecord).where(newWhere);
     } else {
@@ -1003,10 +1063,28 @@ router.post("/webhook/account-transfer", async (req, res) => {
       .set({ userId: newUserId })
       .where(and(eq(tierResultsTable.guildId, guildId), eq(tierResultsTable.userId, oldUserId)));
 
-    // 4. Re-assign all punishments rows from old userId to new userId
-    await db.update(punishmentsTable)
-      .set({ userId: newUserId })
+    // 4. Copy punishment history to the new Discord account without changing
+    // the original rows. The origin id keeps repeat transfers idempotent.
+    const oldPunishments = await db.select().from(punishmentsTable)
       .where(and(eq(punishmentsTable.guildId, guildId), eq(punishmentsTable.userId, oldUserId)));
+    for (const punishment of oldPunishments) {
+      await db.insert(punishmentsTable).values({
+        guildId: punishment.guildId,
+        userId: newUserId,
+        username: punishment.username,
+        type: punishment.type,
+        reason: punishment.reason,
+        durationMs: punishment.durationMs,
+        expiresAt: punishment.expiresAt,
+        active: punishment.active,
+        pardonedBy: punishment.pardonedBy,
+        pardonedAt: punishment.pardonedAt,
+        moderatorId: punishment.moderatorId,
+        moderatorName: punishment.moderatorName,
+        createdAt: punishment.createdAt,
+        sourcePunishmentId: punishment.sourcePunishmentId ?? punishment.id,
+      }).onConflictDoNothing();
+    }
 
     // 5. Delete the old player record — it is now a stale duplicate
     await db.delete(playersTable).where(oldWhere);
