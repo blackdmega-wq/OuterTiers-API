@@ -268,6 +268,11 @@ function authorized(request, body, env, admin = false) {
   return !expected || suppliedSecret(request, body) === expected;
 }
 
+function normalizeUuid(value) {
+  const compact = String(value || "").replace(/-/g, "").trim().toLowerCase();
+  return /^[a-f0-9]{32}$/.test(compact) ? compact : null;
+}
+
 async function recordPlayerName(env, guildId, userId, username, uuid, observedAt = Date.now()) {
   const name = String(username || "").trim();
   if (!/^[A-Za-z0-9_]{3,16}$/.test(name)) return;
@@ -706,6 +711,150 @@ async function handleRequest(request, env) {
     if (request.method === "POST" && parts[0] === "webhook") {
     const body = await request.json().catch(() => ({}));
     if (!authorized(request, body, env)) return json({ error: "Unauthorized" }, 401);
+
+    if (parts[1] === "account-transfer") {
+      const guildId = String(body.guildId || "").trim();
+      const oldUserId = String(body.oldUserId || "").trim();
+      const newUserId = String(body.newUserId || "").trim();
+      const isPreflight = parts[2] === "preflight";
+      if (!guildId || !oldUserId || !newUserId) {
+        return json({ ok: false, error: "guildId, oldUserId and newUserId are required" }, 400);
+      }
+      if (oldUserId === newUserId) {
+        return json({ ok: false, error: "oldUserId and newUserId must be different" }, 400);
+      }
+      if (parts.length !== (isPreflight ? 3 : 2)) return json({ error: "Not found" }, 404);
+      const expectedUuid = body.expectedUuid ? normalizeUuid(body.expectedUuid) : null;
+      if (body.expectedUuid && !expectedUuid) {
+        return json({ ok: false, error: "A valid Minecraft UUID is required" }, 400);
+      }
+
+      const oldPlayer = await first(
+        env, "SELECT * FROM players WHERE guild_id = ? AND user_id = ? LIMIT 1",
+        guildId, oldUserId,
+      );
+      const newPlayer = await first(
+        env, "SELECT * FROM players WHERE guild_id = ? AND user_id = ? LIMIT 1",
+        guildId, newUserId,
+      );
+
+      if (!oldPlayer) {
+        if (isPreflight || !newPlayer) {
+          return json({ ok: false, error: "Old player record not found in website database" }, 404);
+        }
+        const newUuid = normalizeUuid(newPlayer.uuid);
+        if (expectedUuid && newUuid && expectedUuid !== newUuid) {
+          return json({ ok: false, error: "New Discord account is linked to a different Minecraft UUID" }, 409);
+        }
+        // A retry after a completed transfer is safe: the first request already
+        // copied the histories and removed the old player row.
+        return json({ ok: true, transferred: false, idempotent: true, username: newPlayer.username });
+      }
+
+      const oldUuid = normalizeUuid(oldPlayer.uuid);
+      const newUuid = normalizeUuid(newPlayer?.uuid);
+      if ((oldUuid && newUuid && oldUuid !== newUuid)
+        || (expectedUuid && oldUuid && expectedUuid !== oldUuid)
+        || (expectedUuid && newUuid && expectedUuid !== newUuid)) {
+        return json({
+          ok: false,
+          error: "Old and new Discord accounts are linked to different Minecraft UUIDs",
+        }, 409);
+      }
+      if (isPreflight) {
+        return json({ ok: true, username: oldPlayer.username, uuid: oldPlayer.uuid || null });
+      }
+
+      const transferUuid = expectedUuid || oldPlayer.uuid || newPlayer?.uuid || null;
+      const now = Date.now();
+      await run(env, `
+        INSERT INTO players (
+          guild_id, user_id, username, discord_username, uuid, region,
+          current_tier, peak_tier, ogvanilla_tier, vanilla_tier, uhc_tier,
+          pot_tier, nethop_tier, smp_tier, sword_tier, axe_tier, mace_tier,
+          speed_tier, spear_mace_tier, minecart_tier, diamond_smp_tier, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+          username = excluded.username,
+          discord_username = excluded.discord_username,
+          uuid = excluded.uuid,
+          region = excluded.region,
+          current_tier = excluded.current_tier,
+          peak_tier = excluded.peak_tier,
+          ogvanilla_tier = excluded.ogvanilla_tier,
+          vanilla_tier = excluded.vanilla_tier,
+          uhc_tier = excluded.uhc_tier,
+          pot_tier = excluded.pot_tier,
+          nethop_tier = excluded.nethop_tier,
+          smp_tier = excluded.smp_tier,
+          sword_tier = excluded.sword_tier,
+          axe_tier = excluded.axe_tier,
+          mace_tier = excluded.mace_tier,
+          speed_tier = excluded.speed_tier,
+          spear_mace_tier = excluded.spear_mace_tier,
+          minecart_tier = excluded.minecart_tier,
+          diamond_smp_tier = excluded.diamond_smp_tier,
+          updated_at = excluded.updated_at
+      `,
+      guildId, newUserId, oldPlayer.username, oldPlayer.discord_username || null,
+      transferUuid, oldPlayer.region || null, oldPlayer.current_tier || null,
+      oldPlayer.peak_tier || null, oldPlayer.ogvanilla_tier || null,
+      oldPlayer.vanilla_tier || null, oldPlayer.uhc_tier || null,
+      oldPlayer.pot_tier || null, oldPlayer.nethop_tier || null,
+      oldPlayer.smp_tier || null, oldPlayer.sword_tier || null,
+      oldPlayer.axe_tier || null, oldPlayer.mace_tier || null,
+      oldPlayer.speed_tier || null, oldPlayer.spear_mace_tier || null,
+      oldPlayer.minecart_tier || null, oldPlayer.diamond_smp_tier || null, now);
+      await recordPlayerName(env, guildId, newUserId, oldPlayer.username, transferUuid, now);
+
+      await run(env, "UPDATE tier_results SET user_id = ? WHERE guild_id = ? AND user_id = ?",
+        newUserId, guildId, oldUserId);
+      // Copy all punishment history. Keep each original row tied to the old
+      // Discord ID; matching fields make retries idempotent without a schema change.
+      await run(env, `
+        INSERT INTO punishments (
+          guild_id, user_id, username, moderator_id, moderator_name, type, reason,
+          duration_ms, expires_at, active, pardoned_by, pardoned_at, created_at
+        )
+        SELECT
+          source.guild_id, ?, source.username, source.moderator_id, source.moderator_name,
+          source.type, source.reason, source.duration_ms, source.expires_at, source.active,
+          source.pardoned_by, source.pardoned_at, source.created_at
+        FROM punishments AS source
+        WHERE source.guild_id = ? AND source.user_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM punishments AS target
+            WHERE target.guild_id = source.guild_id
+              AND target.user_id = ?
+              AND target.type = source.type
+              AND target.created_at = source.created_at
+              AND target.reason IS source.reason
+              AND target.duration_ms IS source.duration_ms
+              AND target.expires_at IS source.expires_at
+              AND target.moderator_id IS source.moderator_id
+          )
+      `, newUserId, guildId, oldUserId, newUserId);
+
+      await run(env, `
+        INSERT OR IGNORE INTO player_name_history (guild_id, user_id, uuid, username, observed_at)
+        SELECT source.guild_id, ?, source.uuid, source.username, source.observed_at
+        FROM player_name_history AS source
+        WHERE source.guild_id = ? AND source.user_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM player_name_history AS target
+            WHERE target.guild_id = source.guild_id
+              AND target.user_id = ?
+              AND lower(target.username) = lower(source.username)
+          )
+      `, newUserId, guildId, oldUserId, newUserId);
+      await run(env, "DELETE FROM player_name_history WHERE guild_id = ? AND user_id = ?",
+        guildId, oldUserId);
+      await run(env, "DELETE FROM players WHERE guild_id = ? AND user_id = ?",
+        guildId, oldUserId);
+
+      return json({ ok: true, transferred: true, username: oldPlayer.username });
+    }
 
     if (parts[1] === "reconcile-tiers") {
       const result = await reconcileTierResults(env, body.results);
