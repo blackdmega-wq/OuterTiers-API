@@ -135,10 +135,10 @@ function buildPlayer(player) {
   }
 
   return {
-    // Match the Node API contract: `id` is the Discord user ID, not the
-    // D1 row's internal autoincrement key. Bot moderation webhooks use this
-    // value as players.user_id when resolving Minecraft names.
-    id: String(player.user_id),
+    // Keep `id` as the internal row ID for existing website callers, and
+    // expose the canonical Discord identity separately for moderation lookups.
+    id: String(player.id),
+    user_id: String(player.user_id),
     username: player.username,
     uuid: player.uuid || "",
     region: player.region || "EU",

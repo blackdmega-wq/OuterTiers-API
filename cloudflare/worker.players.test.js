@@ -85,6 +85,8 @@ test("player response exposes the start of the current per-mode tier streak in U
 
   assert.equal(response.status, 200);
   const body = await response.json();
+  assert.equal(body.id, "17", "id remains the internal player row ID");
+  assert.equal(body.user_id, "player-1", "canonical Discord ID is exposed separately");
   assert.deepEqual(body.tierDates, { sword: 1_650_000_000 });
 });
 
