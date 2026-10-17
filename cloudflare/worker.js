@@ -135,7 +135,10 @@ function buildPlayer(player) {
   }
 
   return {
-    id: String(player.id),
+    // Match the Node API contract: `id` is the Discord user ID, not the
+    // D1 row's internal autoincrement key. Bot moderation webhooks use this
+    // value as players.user_id when resolving Minecraft names.
+    id: String(player.user_id),
     username: player.username,
     uuid: player.uuid || "",
     region: player.region || "EU",
@@ -588,7 +591,13 @@ async function handlePlayers(env, parts) {
   if (parts.length === 2 && parts[1] === "by-discord") return json({ error: "Invalid player path" }, 400);
 
   const username = decodeURIComponent(parts[1] || "");
-  const row = await first(env, "SELECT * FROM players WHERE lower(username) = lower(?) ORDER BY updated_at DESC LIMIT 1", username);
+  let row = await first(env, "SELECT * FROM players WHERE lower(username) = lower(?) ORDER BY updated_at DESC LIMIT 1", username);
+  if (!row) {
+    const normalizedUuid = username.replace(/-/g, "").toLowerCase();
+    if (/^[0-9a-f]{32}$/.test(normalizedUuid)) {
+      row = await first(env, "SELECT * FROM players WHERE lower(replace(uuid, '-', '')) = ? ORDER BY updated_at DESC LIMIT 1", normalizedUuid);
+    }
+  }
   if (!row) return json({ error: "Player not found" }, 404);
   const [nameHistory, tierDates] = await Promise.all([
     all(env,
