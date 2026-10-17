@@ -1,4 +1,6 @@
 const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1"]);
+const PRESENCE_ACTIVE_WINDOW_MS = 10 * 60_000;
+const PRESENCE_COUNT_CACHE_TTL_SECONDS = 300;
 
 const MODE_COLUMNS = {
   sword: "sword_tier",
@@ -23,7 +25,19 @@ function publicCacheTtl(request) {
   if (request.method !== "GET") return 0;
   const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
   if (path === "/api/players") return 300;
-  if (path === "/api/results/live" || path === "/api/results/high-tier") return 60;
+  const parts = path.split("/").filter(Boolean);
+  if (
+    parts[0] === "api" &&
+    parts[1] === "players" &&
+    ((parts.length === 3 && parts[2] !== "by-discord") ||
+      (parts.length === 4 && (parts[2] === "by-discord" || parts[3] === "history")))
+  ) return 30;
+  if (path === "/api/presence") return PRESENCE_COUNT_CACHE_TTL_SECONDS;
+  if (
+    path === "/api/results/feed" ||
+    path === "/api/results/live" ||
+    path === "/api/results/high-tier"
+  ) return 60;
   return 0;
 }
 
@@ -225,6 +239,51 @@ async function run(env, sql, ...params) {
   return env.DB.prepare(sql).bind(...params).run();
 }
 
+async function getPresenceCount(env, request) {
+  const edgeCache = globalThis.caches?.default;
+  const cacheKey = canonicalCacheKey(new Request(request.url, { method: "GET" }));
+  if (edgeCache) {
+    try {
+      const cached = await edgeCache.match(cacheKey);
+      if (cached) {
+        const body = await cached.json();
+        const count = Number(body?.online);
+        if (Number.isFinite(count)) return count;
+      }
+    } catch (error) {
+      console.warn("[outertiers-api] presence cache read failed", error?.message || error);
+    }
+  }
+
+  const activeSince = Date.now() - PRESENCE_ACTIVE_WINDOW_MS;
+  await run(env, "DELETE FROM presence WHERE last_seen < ?", activeSince);
+  const rows = await all(
+    env,
+    "SELECT COUNT(*) AS count FROM presence WHERE last_seen >= ?",
+    activeSince,
+  );
+  const online = Number(rows[0]?.count || 0);
+
+  if (edgeCache) {
+    try {
+      await edgeCache.put(
+        cacheKey,
+        json(
+          { online },
+          200,
+          {
+            "cache-control": `public, max-age=${PRESENCE_COUNT_CACHE_TTL_SECONDS}, s-maxage=${PRESENCE_COUNT_CACHE_TTL_SECONDS}`,
+          },
+        ),
+      );
+    } catch (error) {
+      console.warn("[outertiers-api] presence cache write failed", error?.message || error);
+    }
+  }
+
+  return online;
+}
+
 async function ensureSchema(env) {
   if (!schemaPromise) {
     schemaPromise = (async () => {
@@ -248,6 +307,11 @@ async function ensureSchema(env) {
         )
       `);
       await run(env, "CREATE UNIQUE INDEX IF NOT EXISTS player_name_history_identity ON player_name_history(guild_id, user_id, lower(username))").catch(() => {});
+      await run(env, "CREATE INDEX IF NOT EXISTS players_username_lower_updated_idx ON players(lower(username), updated_at DESC)").catch(() => {});
+      await run(env, "CREATE INDEX IF NOT EXISTS players_uuid_normalized_idx ON players(lower(replace(uuid, '-', '')))").catch(() => {});
+      await run(env, "CREATE INDEX IF NOT EXISTS tier_results_username_lower_created_idx ON tier_results(lower(username), created_at DESC)").catch(() => {});
+      await run(env, "CREATE INDEX IF NOT EXISTS punishments_username_lower_created_idx ON punishments(lower(username), created_at DESC)").catch(() => {});
+      await run(env, "CREATE INDEX IF NOT EXISTS player_name_history_username_lower_observed_idx ON player_name_history(lower(username), observed_at DESC, id DESC)").catch(() => {});
       // Historical rows are backfilled by the one-time SQL migration, not on a
       // request. Building table-wide indexes and rescanning all players on each
       // cold isolate can hold webhook writes past the bot's request deadline.
@@ -641,15 +705,10 @@ async function handleRequest(request, env) {
   if (apiPath === null) return json({ error: "Not found" }, 404);
   const parts = apiPath.split("/").filter(Boolean);
 
-  // The public player list only reads the already-existing players table. Do
-  // not block it on cold-start D1 schema maintenance: the old behavior waited
-  // for several ALTER/INDEX/INSERT statements on every fresh isolate, which
-  // made cache-busting browser requests time out with an empty leaderboard.
-  const isPublicPlayerList =
-    request.method === "GET" &&
-    parts.length === 1 &&
-    parts[0] === "players";
-  if (!isPublicPlayerList) await ensureSchema(env);
+  // Schema maintenance belongs in migrations, not on high-volume public reads
+  // or presence heartbeats. Keep the legacy repair path for write/admin routes.
+  const isPresenceRoute = parts.length === 1 && parts[0] === "presence";
+  if (request.method !== "GET" && !isPresenceRoute) await ensureSchema(env);
 
   if (request.method === "GET" && parts[0] === "healthz") {
     return json({ status: "ok", v: 6, timestamp: Date.now() });
@@ -668,24 +727,43 @@ async function handleRequest(request, env) {
     return json({ results: rows.map(buildResult) }, 200, { "cache-control": "public, max-age=60" });
   }
 
+  if (request.method === "GET" && parts[0] === "results" && parts[1] === "feed") {
+    const [liveRows, highTierRows] = await Promise.all([
+      all(env, "SELECT * FROM tier_results ORDER BY created_at DESC, id DESC LIMIT 30"),
+      all(env, "SELECT * FROM tier_results WHERE is_high_tier = 1 ORDER BY created_at DESC, id DESC LIMIT 30"),
+    ]);
+    return json(
+      {
+        liveResults: liveRows.map(buildResult),
+        highTierResults: highTierRows.map(buildResult),
+      },
+      200,
+      { "cache-control": "public, max-age=60" },
+    );
+  }
+
   if (request.method === "GET" && parts[0] === "results" && parts[1] === "high-tier") {
     const rows = await all(env, "SELECT * FROM tier_results WHERE is_high_tier = 1 ORDER BY created_at DESC, id DESC LIMIT 30");
     return json({ results: rows.map(buildResult) }, 200, { "cache-control": "public, max-age=60" });
   }
 
   if (request.method === "GET" && parts[0] === "presence") {
-    await run(env, "DELETE FROM presence WHERE last_seen < ?", Date.now() - 120000);
-    const rows = await all(env, "SELECT COUNT(*) AS count FROM presence");
-    return json({ online: Number(rows[0]?.count || 0) });
+    const online = await getPresenceCount(env, request);
+    return json({ online });
   }
 
   if (request.method === "POST" && parts[0] === "presence") {
     const body = await request.json().catch(() => ({}));
-    if (!body.id) return json({ error: "id required" }, 400);
-    await run(env, "INSERT INTO presence (client_id, last_seen) VALUES (?, ?) ON CONFLICT(client_id) DO UPDATE SET last_seen = excluded.last_seen", String(body.id), Date.now());
-    await run(env, "DELETE FROM presence WHERE last_seen < ?", Date.now() - 120000);
-    const rows = await all(env, "SELECT COUNT(*) AS count FROM presence");
-    return json({ online: Number(rows[0]?.count || 0) });
+    const clientId = String(body.id ?? "").trim();
+    if (!clientId || clientId.length > 128) return json({ error: "valid id required" }, 400);
+    await run(
+      env,
+      "INSERT INTO presence (client_id, last_seen) VALUES (?, ?) ON CONFLICT(client_id) DO UPDATE SET last_seen = excluded.last_seen",
+      clientId,
+      Date.now(),
+    );
+    const online = await getPresenceCount(env, request);
+    return json({ online });
   }
 
   if (request.method === "POST" && parts[0] === "migrate") {
