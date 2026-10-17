@@ -134,6 +134,15 @@ async function ensureSchema() {
       created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::BIGINT
     )
   `);
+  await pool.query(`
+    ALTER TABLE punishments
+    ADD COLUMN IF NOT EXISTS source_punishment_id INTEGER
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_punishments_transfer_source
+    ON punishments (guild_id, user_id, source_punishment_id)
+    WHERE source_punishment_id IS NOT NULL
+  `);
   logger.info("DB schema ready");
 }
 
