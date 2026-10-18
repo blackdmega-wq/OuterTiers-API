@@ -160,6 +160,23 @@ test("presence heartbeats reuse the cached count instead of recounting on every 
   }
 });
 
+test("presence window keeps visitors active across a 10-minute heartbeat", async () => {
+  const restoreCache = installCache();
+  try {
+    const DB = new MockPresenceD1();
+    DB.presence.set("visitor-1", Date.now() - 12 * 60_000);
+    const response = await worker.fetch(
+      new Request("https://api.test/api/presence"),
+      { DB },
+    );
+
+    assert.deepEqual(await response.json(), { online: 1 });
+    assert.equal(DB.cleanups, 1);
+  } finally {
+    restoreCache();
+  }
+});
+
 test("combined results feed returns both lists and is edge-cached", async () => {
   const restoreCache = installCache();
   try {
