@@ -1,5 +1,5 @@
 const HIGH_TIERS = new Set(["HT3", "LT2", "HT2", "LT1", "HT1"]);
-const PRESENCE_ACTIVE_WINDOW_MS = 15 * 60_000;
+const PRESENCE_ACTIVE_WINDOW_MS = 40 * 60_000;
 const PRESENCE_COUNT_CACHE_TTL_SECONDS = 300;
 
 const MODE_COLUMNS = {
@@ -24,20 +24,20 @@ const pendingPublicCacheFills = new Map();
 function publicCacheTtl(request) {
   if (request.method !== "GET") return 0;
   const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
-  if (path === "/api/players") return 300;
+  if (path === "/api/players") return 900;
   const parts = path.split("/").filter(Boolean);
   if (
     parts[0] === "api" &&
     parts[1] === "players" &&
     ((parts.length === 3 && parts[2] !== "by-discord") ||
       (parts.length === 4 && (parts[2] === "by-discord" || parts[3] === "history")))
-  ) return 30;
+  ) return 300;
   if (path === "/api/presence") return PRESENCE_COUNT_CACHE_TTL_SECONDS;
   if (
     path === "/api/results/feed" ||
     path === "/api/results/live" ||
     path === "/api/results/high-tier"
-  ) return 60;
+  ) return 900;
   return 0;
 }
 

@@ -137,7 +137,7 @@ test("player list cache reuses entries despite legacy refresh parameters", async
 
     assert.equal(first.status, 200);
     assert.equal(second.status, 200);
-    assert.match(first.headers.get("cache-control"), /max-age=300/);
+    assert.match(first.headers.get("cache-control"), /max-age=900/);
     assert.deepEqual(await second.json(), firstBody);
     assert.equal(DB.playerListReads, 1, "the second request must not read D1 again");
   } finally {

@@ -160,11 +160,11 @@ test("presence heartbeats reuse the cached count instead of recounting on every 
   }
 });
 
-test("presence window keeps visitors active across a 10-minute heartbeat", async () => {
+test("presence window keeps visitors active across a 30-minute heartbeat", async () => {
   const restoreCache = installCache();
   try {
     const DB = new MockPresenceD1();
-    DB.presence.set("visitor-1", Date.now() - 12 * 60_000);
+    DB.presence.set("visitor-1", Date.now() - 32 * 60_000);
     const response = await worker.fetch(
       new Request("https://api.test/api/presence"),
       { DB },
@@ -197,7 +197,7 @@ test("combined results feed returns both lists and is edge-cached", async () => 
     assert.equal(body.liveResults[0].username, "LivePlayer");
     assert.equal(body.highTierResults[0].username, "HighPlayer");
     assert.equal(DB.reads, 2, "the second client reuses the cached combined response");
-    assert.match(second.headers.get("cache-control"), /max-age=60/);
+    assert.match(second.headers.get("cache-control"), /max-age=900/);
   } finally {
     restoreCache();
   }
