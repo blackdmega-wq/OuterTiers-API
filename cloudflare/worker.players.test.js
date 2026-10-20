@@ -46,7 +46,8 @@ class MockStatement {
   }
 
   async run() {
-    return { success: true };
+    this.db.runs.push({ sql: this.sql, params: this.params });
+    return { success: true, meta: { changes: 1 } };
   }
 
   async all() {
@@ -60,16 +61,21 @@ class MockStatement {
     if (/SELECT mode, tier, created_at FROM tier_results/i.test(this.sql)) {
       return { results: this.db.history };
     }
+    if (/FROM punishments WHERE guild_id = \? AND user_id = \? AND active = 1/i.test(this.sql)) {
+      return { results: this.db.punishments };
+    }
     return { results: [] };
   }
 }
 
 class MockD1 {
-  constructor(playerData, historyRows) {
+  constructor(playerData, historyRows, punishmentRows = []) {
     this.player = playerData;
     this.players = playerData ? [playerData] : [];
     this.playerListReads = 0;
     this.history = historyRows;
+    this.punishments = punishmentRows;
+    this.runs = [];
   }
 
   prepare(sql) {
@@ -88,6 +94,64 @@ test("player response exposes the start of the current per-mode tier streak in U
   assert.equal(body.id, "17", "id remains the internal player row ID");
   assert.equal(body.user_id, "player-1", "canonical Discord ID is exposed separately");
   assert.deepEqual(body.tierDates, { sword: 1_650_000_000 });
+  assert.equal(body.punishmentStatus, null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+});
+
+test("profile punishment status ignores expired rows and gives blacklist precedence only while active", async () => {
+  const now = Date.now();
+  const response = await worker.fetch(
+    new Request("https://api.test/api/players/DateTester"),
+    {
+      DB: new MockD1(player, [], [
+        { type: "restrict", active: 1, expiry_mode: "expires", expires_at: now + 60_000 },
+        { type: "blacklist", active: 1, expiry_mode: "expires", expires_at: now - 1 },
+      ]),
+    },
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.punishmentStatus, "restricted");
+});
+
+test("appealable punishments remain visible after their date", async () => {
+  const response = await worker.fetch(
+    new Request("https://api.test/api/players/DateTester"),
+    {
+      DB: new MockD1(player, [], [
+        { type: "blacklist", active: 1, expiry_mode: "appealable", expires_at: Date.now() - 1 },
+      ]),
+    },
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.punishmentStatus, "blacklisted");
+});
+
+test("pardon webhook can clear only the requested sanction type", async () => {
+  const DB = new MockD1(player, []);
+  const response = await worker.fetch(
+    new Request("https://api.test/api/webhook/pardon", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        guildId: "guild-1",
+        userId: "player-1",
+        type: "restrict",
+        allMatching: true,
+        pardonedAt: Date.now(),
+      }),
+    }),
+    { DB },
+  );
+
+  assert.equal(response.status, 200);
+  const update = DB.runs.find((entry) => /UPDATE punishments SET active = 0/.test(entry.sql));
+  assert.ok(update);
+  assert.match(update.sql, /AND type = \?/);
+  assert.equal(update.params.at(-1), "restrict");
 });
 
 test("player response does not invent a date when history does not match the current tier", async () => {

@@ -29,8 +29,8 @@ function publicCacheTtl(request) {
   if (
     parts[0] === "api" &&
     parts[1] === "players" &&
-    ((parts.length === 3 && parts[2] !== "by-discord") ||
-      (parts.length === 4 && (parts[2] === "by-discord" || parts[3] === "history")))
+    parts.length === 4 &&
+    (parts[2] === "by-discord" || parts[3] === "history")
   ) return 300;
   if (path === "/api/presence") return PRESENCE_COUNT_CACHE_TTL_SECONDS;
   if (
@@ -161,6 +161,53 @@ function buildPlayer(player) {
     currentTier: rawTierToTLevel(player.current_tier),
     peakTier: rawTierToTLevel(player.peak_tier),
     updatedAt: Number(player.updated_at),
+  };
+}
+
+function buildPunishmentStatus(rows, now = Date.now()) {
+  const activePunishments = rows.filter((row) => {
+    if (Number(row.active) !== 1) return false;
+    const type = String(row.type || "").toLowerCase();
+    if (type !== "restrict" && type !== "blacklist") return false;
+
+    // Older API rows have no expiry_mode value. Treat a dated legacy
+    // punishment as expiring; new rows preserve the bot's actual expiry mode.
+    const expiryMode = String(row.expiry_mode || "expires").toLowerCase();
+    const expiresAt = row.expires_at == null ? null : Number(row.expires_at);
+    return expiryMode === "appealable" ||
+      expiresAt === null ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt > now;
+  });
+
+  const punishmentStatus = activePunishments.some(
+    (row) => String(row.type).toLowerCase() === "blacklist",
+  )
+    ? "blacklisted"
+    : activePunishments.some((row) => String(row.type).toLowerCase() === "restrict")
+      ? "restricted"
+      : null;
+  if (!punishmentStatus) {
+    return { punishmentStatus: null, punishmentExpiresAt: null };
+  }
+
+  const expectedType = punishmentStatus === "blacklisted" ? "blacklist" : "restrict";
+  const matching = activePunishments.filter(
+    (row) => String(row.type).toLowerCase() === expectedType,
+  );
+  const hasNonExpiring = matching.some((row) => {
+    const expiryMode = String(row.expiry_mode || "expires").toLowerCase();
+    const expiresAt = row.expires_at == null ? null : Number(row.expires_at);
+    return expiryMode === "appealable" || expiresAt === null || !Number.isFinite(expiresAt);
+  });
+  const expiryTimes = matching
+    .filter((row) => String(row.expiry_mode || "expires").toLowerCase() !== "appealable")
+    .map((row) => Number(row.expires_at))
+    .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > now);
+
+  return {
+    punishmentStatus,
+    punishmentExpiresAt: hasNonExpiring || expiryTimes.length === 0 ? null : Math.max(...expiryTimes),
   };
 }
 
@@ -642,6 +689,7 @@ async function handlePlayers(env, parts) {
         reason: row.reason || null,
         durationMs: row.duration_ms == null ? null : Number(row.duration_ms),
         expiresAt: row.expires_at == null ? null : Number(row.expires_at),
+        expiryMode: row.expiry_mode || null,
         active: Boolean(row.active),
         pardonedBy: row.pardoned_by || null,
         pardonedAt: row.pardoned_at == null ? null : Number(row.pardoned_at),
@@ -668,21 +716,25 @@ async function handlePlayers(env, parts) {
     }
   }
   if (!row) return json({ error: "Player not found" }, 404);
-  const [nameHistory, tierDates] = await Promise.all([
+  const [nameHistory, tierDates, punishmentRows] = await Promise.all([
     all(env,
       "SELECT username, uuid, observed_at FROM player_name_history WHERE user_id = ? ORDER BY observed_at DESC, id DESC",
       row.user_id),
     buildTierDates(env, row),
+    all(env,
+      "SELECT type, expires_at, expiry_mode, active FROM punishments WHERE guild_id = ? AND user_id = ? AND active = 1 AND lower(type) IN ('restrict', 'blacklist')",
+      row.guild_id, row.user_id),
   ]);
   return json({
     ...buildPlayer(row),
+    ...buildPunishmentStatus(punishmentRows),
     tierDates,
     nameHistory: nameHistory.map((entry) => ({
       username: entry.username,
       uuid: entry.uuid || null,
       observedAt: Number(entry.observed_at),
     })),
-  }, 200, { "cache-control": "public, max-age=30" });
+  }, 200, { "cache-control": "no-store" });
 }
 
 async function handleRequest(request, env) {
@@ -893,11 +945,11 @@ async function handleRequest(request, env) {
       await run(env, `
         INSERT INTO punishments (
           guild_id, user_id, username, moderator_id, moderator_name, type, reason,
-          duration_ms, expires_at, active, pardoned_by, pardoned_at, created_at
+          duration_ms, expires_at, expiry_mode, active, pardoned_by, pardoned_at, created_at
         )
         SELECT
           source.guild_id, ?, source.username, source.moderator_id, source.moderator_name,
-          source.type, source.reason, source.duration_ms, source.expires_at, source.active,
+          source.type, source.reason, source.duration_ms, source.expires_at, source.expiry_mode, source.active,
           source.pardoned_by, source.pardoned_at, source.created_at
         FROM punishments AS source
         WHERE source.guild_id = ? AND source.user_id = ?
@@ -910,6 +962,7 @@ async function handleRequest(request, env) {
               AND target.reason IS source.reason
               AND target.duration_ms IS source.duration_ms
               AND target.expires_at IS source.expires_at
+              AND target.expiry_mode IS source.expiry_mode
               AND target.moderator_id IS source.moderator_id
           )
       `, newUserId, guildId, oldUserId, newUserId);
@@ -1054,19 +1107,29 @@ async function handleRequest(request, env) {
       let inserted = 0;
       for (const punishment of body.punishments) {
         if (!punishment.guildId || !punishment.userId || !punishment.type) continue;
-        const existing = await first(env, "SELECT id FROM punishments WHERE guild_id = ? AND user_id = ? AND type = ? AND ABS(created_at - ?) < 10000 LIMIT 1",
-          punishment.guildId, punishment.userId, punishment.type, Number(punishment.createdAt) || Date.now());
-        if (existing) continue;
+        const createdAt = Number(punishment.createdAt) || Date.now();
+        const expiryMode = ["appealable", "expires"].includes(punishment.expiryMode)
+          ? punishment.expiryMode
+          : null;
+        const existing = await first(env, "SELECT id, expiry_mode FROM punishments WHERE guild_id = ? AND user_id = ? AND type = ? AND ABS(created_at - ?) < 10000 LIMIT 1",
+          punishment.guildId, punishment.userId, punishment.type, createdAt);
+        if (existing) {
+          if (!existing.expiry_mode && expiryMode) {
+            await run(env, "UPDATE punishments SET expiry_mode = ? WHERE id = ?", expiryMode, existing.id);
+          }
+          continue;
+        }
         await run(env, `
           INSERT INTO punishments
             (guild_id, user_id, username, moderator_id, moderator_name, type, reason,
-             duration_ms, expires_at, active, pardoned_by, pardoned_at, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             duration_ms, expires_at, expiry_mode, active, pardoned_by, pardoned_at, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, punishment.guildId, punishment.userId, punishment.username || `Discord user ${punishment.userId}`,
           punishment.moderatorId || null, punishment.moderatorName || null, punishment.type,
           punishment.reason || null, punishment.durationMs || null, punishment.expiresAt || null,
+          expiryMode,
           punishment.active === false ? 0 : 1, punishment.pardonedBy || null, punishment.pardonedAt || null,
-          Number(punishment.createdAt) || Date.now());
+          createdAt);
         inserted++;
       }
       return json({ ok: true, inserted, skipped: body.punishments.length - inserted });
@@ -1096,18 +1159,46 @@ async function handleRequest(request, env) {
       await run(env, `
         INSERT INTO punishments
           (guild_id, user_id, username, moderator_id, moderator_name, type, reason,
-           duration_ms, expires_at, active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           duration_ms, expires_at, expiry_mode, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, body.guildId, body.userId, body.username || `Discord user ${body.userId}`,
         body.moderatorId || null, body.moderatorName || null, body.type, body.reason || null,
-        body.durationMs || null, body.expiresAt || null, 1, Number(body.createdAt) || Date.now());
+        body.durationMs || null, body.expiresAt || null,
+        ["appealable", "expires"].includes(body.expiryMode) ? body.expiryMode : null,
+        1, Number(body.createdAt) || Date.now());
       return json({ ok: true });
     }
 
     if (parts[1] === "pardon") {
-      await run(env, "UPDATE punishments SET active = 0, pardoned_by = ?, pardoned_at = ? WHERE guild_id = ? AND user_id = ? AND active = 1",
-        body.pardonedBy || null, Number(body.pardonedAt) || Date.now(), body.guildId, body.userId);
-      return json({ ok: true });
+      if (!body.guildId || !body.userId) return json({ error: "guildId and userId are required" }, 400);
+      const typeFilter = body.type ? " AND type = ?" : "";
+      const params = [
+        body.pardonedBy || null,
+        Number(body.pardonedAt) || Date.now(),
+        body.guildId,
+        body.userId,
+        ...(body.type ? [body.type] : []),
+      ];
+
+      if (body.allMatching === true || !body.type) {
+        const result = await run(env,
+          `UPDATE punishments SET active = 0, pardoned_by = ?, pardoned_at = ?
+           WHERE guild_id = ? AND user_id = ? AND active = 1${typeFilter}`,
+          ...params);
+        return json({ ok: true, updated: Number(result?.meta?.changes || 0) });
+      }
+
+      const active = await first(env,
+        `SELECT id FROM punishments
+         WHERE guild_id = ? AND user_id = ? AND active = 1${typeFilter}
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+        body.guildId, body.userId, ...(body.type ? [body.type] : []));
+      if (!active) return json({ ok: true, updated: 0 });
+
+      await run(env,
+        "UPDATE punishments SET active = 0, pardoned_by = ?, pardoned_at = ? WHERE id = ?",
+        body.pardonedBy || null, Number(body.pardonedAt) || Date.now(), active.id);
+      return json({ ok: true, updated: 1 });
     }
   }
 

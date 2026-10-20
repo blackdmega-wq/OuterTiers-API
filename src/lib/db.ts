@@ -82,6 +82,7 @@ export const punishmentsTable = pgTable("punishments", {
   reason: text("reason"),
   durationMs: bigint("duration_ms", { mode: "number" }),
   expiresAt: bigint("expires_at", { mode: "number" }),
+  expiryMode: text("expiry_mode"),
   active: boolean("active").notNull().default(true),
   pardonedBy: text("pardoned_by"),
   pardonedAt: bigint("pardoned_at", { mode: "number" }),

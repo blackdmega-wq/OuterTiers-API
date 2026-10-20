@@ -745,7 +745,7 @@ router.post("/webhook/reconcile-tiers", async (req, res) => {
 router.post("/webhook/punishment", async (req, res) => {
   if (!requireSecret(req, res)) return;
 
-  const { guildId, userId, username, type, reason, durationMs, expiresAt,
+  const { guildId, userId, username, type, reason, durationMs, expiresAt, expiryMode,
           moderatorId, moderatorName, createdAt } = req.body as Record<string, any>;
 
   if (!guildId || !userId || !type)
@@ -760,6 +760,7 @@ router.post("/webhook/punishment", async (req, res) => {
       reason: reason ?? null,
       durationMs: typeof durationMs === "number" ? durationMs : null,
       expiresAt: typeof expiresAt === "number" ? expiresAt : null,
+      expiryMode: ["appealable", "expires"].includes(expiryMode) ? expiryMode : null,
       active: true,
       pardonedBy: null,
       pardonedAt: null,
@@ -788,7 +789,7 @@ router.post("/webhook/bulk-punishments", async (req, res) => {
   const WINDOW = 10_000;
 
   for (const p of punishments) {
-    const { guildId, userId, username, type, reason, durationMs, expiresAt,
+    const { guildId, userId, username, type, reason, durationMs, expiresAt, expiryMode,
             active, pardonedBy, pardonedAt, moderatorId, moderatorName, createdAt } = p;
     if (!guildId || !userId || !type) { skipped++; continue; }
 
@@ -796,7 +797,7 @@ router.post("/webhook/bulk-punishments", async (req, res) => {
 
     try {
       const existing = await db
-        .select({ id: punishmentsTable.id })
+        .select({ id: punishmentsTable.id, expiryMode: punishmentsTable.expiryMode })
         .from(punishmentsTable)
         .where(
           and(
@@ -808,7 +809,15 @@ router.post("/webhook/bulk-punishments", async (req, res) => {
         )
         .limit(1);
 
-      if (existing.length > 0) { skipped++; continue; }
+      if (existing.length > 0) {
+        if (!existing[0].expiryMode && ["appealable", "expires"].includes(expiryMode)) {
+          await db.update(punishmentsTable)
+            .set({ expiryMode })
+            .where(eq(punishmentsTable.id, existing[0].id));
+        }
+        skipped++;
+        continue;
+      }
 
       const displayName = username || userId;
       await db.insert(punishmentsTable).values({
@@ -818,6 +827,7 @@ router.post("/webhook/bulk-punishments", async (req, res) => {
         reason: reason ?? null,
         durationMs: typeof durationMs === "number" ? durationMs : null,
         expiresAt: typeof expiresAt === "number" ? expiresAt : null,
+        expiryMode: ["appealable", "expires"].includes(expiryMode) ? expiryMode : null,
         active: active !== false,
         pardonedBy: pardonedBy ?? null,
         pardonedAt: typeof pardonedAt === "number" ? pardonedAt : null,
@@ -840,22 +850,38 @@ router.post("/webhook/bulk-punishments", async (req, res) => {
 router.post("/webhook/pardon", async (req, res) => {
   if (!requireSecret(req, res)) return;
 
-  const { guildId, userId, pardonedBy, pardonedAt } = req.body as Record<string, any>;
+  const { guildId, userId, type, allMatching, pardonedBy, pardonedAt } = req.body as Record<string, any>;
   if (!guildId || !userId)
     return res.status(400).json({ error: "Missing required fields: guildId, userId" });
 
   try {
-    // Find the most recent active punishment for this user
+    const typeFilter = typeof type === "string"
+      ? [eq(punishmentsTable.type, type)]
+      : [];
+    const matchingRows = and(
+      eq(punishmentsTable.guildId, guildId),
+      eq(punishmentsTable.userId, userId),
+      eq(punishmentsTable.active, true),
+      ...typeFilter,
+    );
+
+    if (allMatching === true || typeof type !== "string") {
+      const result = await db
+        .update(punishmentsTable)
+        .set({
+          active: false,
+          pardonedBy: pardonedBy ?? null,
+          pardonedAt: typeof pardonedAt === "number" ? pardonedAt : Date.now(),
+        })
+        .where(matchingRows);
+      return res.json({ ok: true, updated: Number(result.rowCount || 0) });
+    }
+
+    // A single /pardon lifts only the latest active punishment of that type.
     const active = await db
       .select({ id: punishmentsTable.id })
       .from(punishmentsTable)
-      .where(
-        and(
-          eq(punishmentsTable.guildId, guildId),
-          eq(punishmentsTable.userId, userId),
-          eq(punishmentsTable.active, true),
-        )
-      )
+      .where(matchingRows)
       .orderBy(desc(punishmentsTable.createdAt))
       .limit(1);
 

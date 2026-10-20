@@ -13,6 +13,25 @@ function discordIdsForPlayer(player: DbPlayer): string[] {
   return [...new Set([player.userId, ...(player.discordUserIds ?? [])].filter(Boolean))];
 }
 
+function buildPunishmentStatus(
+  rows: Array<{ type: string; expiresAt: number | null; expiryMode: string | null; active: boolean }>,
+  now = Date.now(),
+) {
+  const active = rows.filter((row) => {
+    if (!row.active || !["restrict", "blacklist"].includes(row.type.toLowerCase())) return false;
+    const expiresAt = row.expiresAt == null ? null : Number(row.expiresAt);
+    return row.expiryMode === "appealable" || expiresAt == null ||
+      !Number.isFinite(expiresAt) || expiresAt > now;
+  });
+  const punishmentStatus = active.some((row) => row.type.toLowerCase() === "blacklist")
+    ? "blacklisted"
+    : active.some((row) => row.type.toLowerCase() === "restrict")
+      ? "restricted"
+      : null;
+  if (!punishmentStatus) return { punishmentStatus: null };
+  return { punishmentStatus };
+}
+
 function rawTierToLevel(tier: string | null | undefined): string {
   if (!tier) return "-";
   const num = tier.replace(/[^0-9]/g, "");
@@ -204,6 +223,18 @@ router.get("/players/:username", async (req, res) => {
       .from(playerNameHistoryTable)
       .where(inArray(playerNameHistoryTable.userId, historyUserIds))
       .orderBy(desc(playerNameHistoryTable.observedAt), desc(playerNameHistoryTable.id));
+    const punishmentRows = await db
+      .select({
+        type: punishmentsTable.type,
+        expiresAt: punishmentsTable.expiresAt,
+        expiryMode: punishmentsTable.expiryMode,
+        active: punishmentsTable.active,
+      })
+      .from(punishmentsTable)
+      .where(and(
+        eq(punishmentsTable.guildId, row.guildId),
+        inArray(punishmentsTable.userId, historyUserIds),
+      ));
 
     const modeCurrentTier: Record<string, string | null | undefined> = {
       ogvanilla: row.ogvanillaTier, vanilla: row.vanillaTier, uhc: row.uhcTier,
@@ -257,7 +288,13 @@ router.get("/players/:username", async (req, res) => {
       }
     }
 
-    return res.json({ ...dbPlayerToWeb(row), tierDates, peakTiers, nameHistory });
+    return res.json({
+      ...dbPlayerToWeb(row),
+      ...buildPunishmentStatus(punishmentRows),
+      tierDates,
+      peakTiers,
+      nameHistory,
+    });
   } catch (err) {
     console.error("[/api/players/:username] DB error:", (err as Error).message);
     return res.status(503).json({ error: "Database temporarily unavailable. Please try again." });
