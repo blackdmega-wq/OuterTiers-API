@@ -30,7 +30,7 @@ function publicCacheTtl(request) {
     parts[0] === "api" &&
     parts[1] === "players" &&
     parts.length === 4 &&
-    (parts[2] === "by-discord" || parts[3] === "history")
+    parts[2] === "by-discord"
   ) return 300;
   if (path === "/api/presence") return PRESENCE_COUNT_CACHE_TTL_SECONDS;
   if (
@@ -702,7 +702,8 @@ async function handlePlayers(env, parts) {
         uuid: row.uuid || null,
         observedAt: Number(row.observed_at),
       })),
-    }, 200, { "cache-control": "public, max-age=30" });
+    // Moderation history must reflect new webhook writes immediately.
+    }, 200, { "cache-control": "no-store" });
   }
 
   if (parts.length === 2 && parts[1] === "by-discord") return json({ error: "Invalid player path" }, 400);
