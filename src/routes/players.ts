@@ -306,6 +306,7 @@ router.get("/players/:username", async (req, res) => {
 // Called by the PlayerProfile page on the OuterTiers website.
 
 router.get("/players/:username/history", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   const { username } = req.params;
   if (!MC_NAME_RE.test(username)) {
     return res.status(404).json({ error: "Player not found" });

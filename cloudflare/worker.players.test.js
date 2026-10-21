@@ -212,3 +212,44 @@ test("player list cache reuses entries despite legacy refresh parameters", async
     }
   }
 });
+
+test("player punishment history bypasses the public edge cache", async () => {
+  const cacheCalls = { matches: 0, puts: 0 };
+  const cache = {
+    async match() {
+      cacheCalls.matches++;
+      return new Response(JSON.stringify({ punishments: [{ type: "stale" }] }), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async put() {
+      cacheCalls.puts++;
+    },
+  };
+  const originalCaches = Object.getOwnPropertyDescriptor(globalThis, "caches");
+  Object.defineProperty(globalThis, "caches", {
+    configurable: true,
+    writable: true,
+    value: { default: cache },
+  });
+
+  try {
+    const env = { DB: new MockD1(player, []) };
+    const url = "https://cache-test.example/api/players/DateTester/history";
+    const first = await worker.fetch(new Request(url), env);
+    const second = await worker.fetch(new Request(url), env);
+
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(first.headers.get("cache-control"), "no-store");
+    assert.deepEqual((await first.json()).punishments, []);
+    assert.equal(cacheCalls.matches, 0, "history requests must not read a stale cache entry");
+    assert.equal(cacheCalls.puts, 0, "history responses must not be cached");
+  } finally {
+    if (originalCaches) {
+      Object.defineProperty(globalThis, "caches", originalCaches);
+    } else {
+      delete globalThis.caches;
+    }
+  }
+});
